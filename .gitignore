@@ -1,0 +1,10 @@
+glubschauge\__pycache__/*
+dashboard/__pycache__/*
+ring/*
+glubschauge.db
+glubschauge.log
+glubschauge.db-shm
+glubschauge.db-wal
+
+
+
