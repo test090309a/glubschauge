@@ -16,7 +16,16 @@ from textual.reactive import reactive
 from textual.widgets import DataTable, Footer, Header, Static
 from textual.widgets.data_table import RowKey
 
+from .broker import SYSTEM_PROMPT, build_prompt, model_for
+
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Konstanten
+# ---------------------------------------------------------------------------
+
+FILTER_LEVELS = [0, 2, 3, 5, 7, 8]   # Zyklus für `s`
 
 
 # ---------------------------------------------------------------------------
@@ -24,17 +33,24 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class StatusBar(Static):
-    processed = reactive(0)
-    events    = reactive(0)
-    llm_done  = reactive(0)
-    pps       = reactive(0.0)
+    processed  = reactive(0)
+    events     = reactive(0)
+    llm_done   = reactive(0)
+    pps        = reactive(0.0)
+    sev_filter = reactive(0)
 
     def render(self) -> str:
+        filt = (
+            f"[yellow]Filter≥{self.sev_filter}[/]"
+            if self.sev_filter > 0
+            else "[dim]Filter off[/]"
+        )
         return (
             f"Engine: {self.processed:>7} pkts   "
             f"Events: {self.events:>4}   "
             f"LLM: {self.llm_done:>4}   "
-            f"({self.pps:>6.1f} pkts/s)"
+            f"({self.pps:>6.1f} pkts/s)   "
+            f"{filt}"
         )
 
 
@@ -80,18 +96,18 @@ class PacketTable(DataTable):
         src = f"{_short_addr(pkt.src)}:{pkt.src_port}" if pkt.src_port else _short_addr(pkt.src)
         dst = f"{_short_addr(pkt.dst)}:{pkt.dst_port}" if pkt.dst_port else _short_addr(pkt.dst)
         info = pkt.summary().split(None, 3)[-1] if pkt.frame_number else ""
-
         self.add_row(time_str, pkt.protocol, src, dst, info or "")
         if self.row_count > self.MAX_ROWS:
             self.remove_row(next(iter(self.rows)))
 
 
 # ---------------------------------------------------------------------------
-# Event-Tabelle
+# Event-Tabelle mit Filter
 # ---------------------------------------------------------------------------
 
 class EventFeed(DataTable):
-    """Ein Event = eine Zeile. Severity wird beim LLM-Ergebnis aktualisiert."""
+    """Ein Event = eine Zeile. Severity wird beim LLM-Ergebnis aktualisiert.
+    Mit integriertem Severity-Filter (nur Anzeige, DB bleibt unberührt)."""
 
     class RowActivated(Message):
         def __init__(self, event_id: int) -> None:
@@ -100,8 +116,10 @@ class EventFeed(DataTable):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._row_keys: dict[int, RowKey] = {}
-        self._events:   dict[int, object] = {}
+        self._row_keys:   dict[int, RowKey] = {}
+        self._events:     dict[int, object] = {}
+        self._llm_sev:    dict[int, int]    = {}
+        self._min_sev:    int = 0
         self._current_event_id: int | None = None
         self._col_sev_key = None
 
@@ -113,45 +131,106 @@ class EventFeed(DataTable):
         self.add_column("Detektor", width=16)
         self.add_column("Titel")
 
+    @property
+    def min_sev(self) -> int:
+        return self._min_sev
+
+    # -- Event eintreffen ---------------------------------------------
+
     def add_event(self, event_id: int, ev) -> None:
+        self._events[event_id] = ev
+        if self._effective_sev(event_id, ev) >= self._min_sev:
+            self._insert_row(event_id, ev)
+
+    def update_event_severity(self, event_id: int, severity: int) -> None:
+        self._llm_sev[event_id] = severity
+        ev = self._events.get(event_id)
+        if ev is None:
+            return
+
+        visible   = event_id in self._row_keys
+        should_show = severity >= self._min_sev
+
+        if should_show and not visible:
+            self._insert_row(event_id, ev)
+        elif should_show and visible:
+            self._update_sev_cell(event_id, severity)
+        elif not should_show and visible:
+            self._remove_row(event_id)
+
+    # -- Filter --------------------------------------------------------
+
+    def set_filter(self, min_sev: int) -> None:
+        if min_sev == self._min_sev:
+            return
+        self._min_sev = min_sev
+        self._rebuild()
+
+    def _rebuild(self) -> None:
+        # Alle Zeilen weg, dann gefilterte neu einfügen
+        self.clear()                              # rows only, columns bleiben
+        self._row_keys.clear()
+        for eid, ev in self._events.items():
+            if self._effective_sev(eid, ev) >= self._min_sev:
+                self._insert_row(eid, ev)
+
+        # Cursor wiederherstellen
+        if self._current_event_id in self._row_keys and self.row_count > 0:
+            self.move_cursor(row=0)
+            for idx, eid in enumerate(self._row_keys.keys()):
+                if eid == self._current_event_id:
+                    self.move_cursor(row=idx)
+                    break
+
+    # -- Interne Helfer -------------------------------------------------
+
+    def _effective_sev(self, event_id: int, ev) -> int:
+        return self._llm_sev.get(event_id, ev.severity_hint)
+
+    def _insert_row(self, event_id: int, ev) -> None:
         time_str = ev.timestamp.astimezone().strftime("%H:%M:%S")
-        color = _sev_color(ev.severity_hint)
+        sev      = self._effective_sev(event_id, ev)
+        color    = _sev_color(sev)
         row_key = self.add_row(
             time_str,
-            f"[{color}]{ev.severity_hint}[/]",
+            f"[{color}]{sev}[/]",
             ev.detector,
             ev.title,
         )
         self._row_keys[event_id] = row_key
-        self._events[event_id]   = ev
 
-        # Wenn dies das erste Event ist → Cursor setzen und Fokus geben
-        if len(self._row_keys) == 1:
+        # Erste sichtbare Zeile bekommt Fokus, damit `d`/`w`/`r` sofort greifen
+        if self._current_event_id is None:
             self._current_event_id = event_id
-            self.move_cursor(row=0)
-            self.focus()
+            self.move_cursor(row=self.row_count - 1)
+            try:
+                self.focus()
+            except Exception:
+                pass
 
-    def update_event_severity(self, event_id: int, severity: int) -> None:
-        row_key = self._row_keys.get(event_id)
-        if row_key is None or self._col_sev_key is None:
+    def _remove_row(self, event_id: int) -> None:
+        rk = self._row_keys.pop(event_id, None)
+        if rk is not None:
+            try:
+                self.remove_row(rk)
+            except Exception:
+                pass
+
+    def _update_sev_cell(self, event_id: int, severity: int) -> None:
+        rk = self._row_keys.get(event_id)
+        if rk is None or self._col_sev_key is None:
             return
         color = _sev_color(severity)
         try:
             self.update_cell(
-                row_key, self._col_sev_key,
+                rk, self._col_sev_key,
                 f"[{color}]{severity}[/]",
                 update_width=True,
             )
         except Exception as e:
             log.warning("update_cell fehlgeschlagen: %s", e)
 
-    def clear_all(self) -> None:
-        self.clear()
-        self._row_keys.clear()
-        self._events.clear()
-        self._current_event_id = None
-
-    # -- Tracking der aktuell hervorgehobenen Zeile ---------------------
+    # -- Tracking -------------------------------------------------------
 
     def on_data_table_row_highlighted(
         self, event: DataTable.RowHighlighted
@@ -168,7 +247,7 @@ class EventFeed(DataTable):
                 self.post_message(self.RowActivated(eid))
                 return
 
-    # -- Zugriff für App -----------------------------------------------
+    # -- Zugriff --------------------------------------------------------
 
     def selected_event_id(self) -> int | None:
         return self._current_event_id
@@ -176,14 +255,19 @@ class EventFeed(DataTable):
     def get_event(self, event_id: int):
         return self._events.get(event_id)
 
+    def clear_all(self) -> None:
+        self.clear()
+        self._row_keys.clear()
+        self._events.clear()
+        self._llm_sev.clear()
+        self._current_event_id = None
+
 
 # ---------------------------------------------------------------------------
 # Detail-Panel
 # ---------------------------------------------------------------------------
 
 class DetailPanel(Static):
-    """Zeigt das aktuell selektierte Event im Detail."""
-
     def on_mount(self) -> None:
         self.update("[dim]Event auswählen und [b]d[/b] drücken für Details.[/]")
 
@@ -191,7 +275,6 @@ class DetailPanel(Static):
         if data is None:
             self.update("[dim]Kein Event selektiert.[/]")
             return
-
         try:
             details_pretty = _json.dumps(
                 _json.loads(data["details"]), indent=2, ensure_ascii=False
@@ -249,11 +332,14 @@ class GlubschaugeApp(App):
     SUB_TITLE = "Netzwerk-Monitor mit lokaler KI"
 
     BINDINGS = [
-        ("q",       "quit",            "Beenden"),
-        ("c",       "clear_tables",    "Leeren"),
-        ("d",       "show_details",    "Details"),
-        ("escape",  "hide_details",    "Detail schließen"),
-        ("w",       "open_wireshark",  "Wireshark"),
+        ("q",       "quit",              "Beenden"),
+        ("c",       "clear_tables",      "Leeren"),
+        ("d",       "show_details",      "Details"),
+        ("escape",  "hide_details",      "Detail schließen"),
+        ("w",       "open_wireshark",    "Wireshark"),
+        ("s",       "cycle_filter",      "Filter"),
+        ("r",       "reanalyse",         "Re-Analyse"),
+        ("R",       "reanalyse_deep",    "Tiefenanalyse"),
     ]
 
     def __init__(self, engine, worker, capture, ringbuffer=None) -> None:
@@ -319,10 +405,11 @@ class GlubschaugeApp(App):
             now = datetime.now(timezone.utc).timestamp()
             recent = [t for t in self._packet_times if now - t < 1.0]
             bar = self.query_one(StatusBar)
-            bar.processed = self.engine._processed
-            bar.events    = self.engine.store.count()
-            bar.llm_done  = self.worker.processed
-            bar.pps       = float(len(recent))
+            bar.processed  = self.engine._processed
+            bar.events     = self.engine.store.count()
+            bar.llm_done   = self.worker.processed
+            bar.pps        = float(len(recent))
+            bar.sev_filter = self.query_one("#events", EventFeed).min_sev
 
     # ---- Actions -------------------------------------------------------
 
@@ -335,7 +422,8 @@ class GlubschaugeApp(App):
         feed = self.query_one("#events", EventFeed)
         eid = feed.selected_event_id()
         if eid is None:
-            self.notify("Kein Event selektiert – erst eins anklicken", severity="warning")
+            self.notify("Kein Event selektiert – erst eins anklicken",
+                        severity="warning")
             return
         data = self.engine.store.get_event_full(eid)
         if data is None:
@@ -348,7 +436,7 @@ class GlubschaugeApp(App):
 
     def action_open_wireshark(self) -> None:
         feed = self.query_one("#events", EventFeed)
-        eid = feed.selected_event_id()
+        eid  = feed.selected_event_id()
         if eid is None:
             self.notify("Kein Event selektiert", severity="warning")
             return
@@ -358,12 +446,22 @@ class GlubschaugeApp(App):
             return
         self._open_wireshark_for(ev)
 
-    def on_event_feed_row_activated(self, message: EventFeed.RowActivated) -> None:
-        """Enter auf Event-Feed → Wireshark öffnen."""
+    def action_cycle_filter(self) -> None:
         feed = self.query_one("#events", EventFeed)
-        ev = feed.get_event(message.event_id)
-        if ev is not None:
-            self._open_wireshark_for(ev)
+        try:
+            idx = FILTER_LEVELS.index(feed.min_sev)
+            new = FILTER_LEVELS[(idx + 1) % len(FILTER_LEVELS)]
+        except ValueError:
+            new = 0
+        feed.set_filter(new)
+        self.notify(f"Severity-Filter: ≥ {new}" if new > 0 else "Severity-Filter: aus",
+                    timeout=1)
+
+    def action_reanalyse(self) -> None:
+        self._trigger_reanalyse(stage="analyze")
+
+    def action_reanalyse_deep(self) -> None:
+        self._trigger_reanalyse(stage="forensic")
 
     # ---- Wireshark ----------------------------------------------------
 
@@ -387,11 +485,81 @@ class GlubschaugeApp(App):
                         severity="error")
             return
 
-        # Losgelöst starten, damit die TUI nicht blockiert
-        creationflags = 0x00000008 | 0x00000200   # DETACHED | NEW_PROCESS_GROUP
+        creationflags = 0x00000008 | 0x00000200
         subprocess.Popen(
             [str(wireshark_exe), str(snapshot)],
             creationflags=creationflags,
             close_fds=True,
         )
         self.notify(f"Wireshark: {snapshot.name}", timeout=3)
+
+    # ---- Re-Analyse ---------------------------------------------------
+
+    def _trigger_reanalyse(self, stage: str) -> None:
+        feed = self.query_one("#events", EventFeed)
+        eid = feed.selected_event_id()
+        if eid is None:
+            self.notify("Kein Event selektiert – erst eins anklicken",
+                        severity="warning")
+            return
+        ev = feed.get_event(eid)
+        if ev is None:
+            self.notify("Event-Objekt nicht gefunden", severity="error")
+            return
+        model = model_for(stage)
+        self.notify(f"Re-Analyse # {eid} läuft ({model})…", timeout=2)
+        # exclusive in der Gruppe 'reanalyse' → verhindert VRAM-Thrashing
+        self.run_worker(
+            self._reanalyse(eid, ev, model),
+            name=f"reanalyse-{eid}",
+            group="reanalyse",
+            exclusive=True,
+        )
+
+    async def _reanalyse(self, event_id: int, ev, model: str) -> None:
+        try:
+            prompt = build_prompt(ev)
+            result = await self.worker.client.evaluate(
+                model=model,
+                prompt=prompt,
+                system=SYSTEM_PROMPT,
+                max_tokens=200,
+            )
+        except Exception as e:
+            log.exception("Re-Analyse fehlgeschlagen")
+            self.notify(f"Re-Analyse Fehler: {e}", severity="error", timeout=5)
+            return
+
+        # In DB überschreiben
+        self.engine.store.write_evaluation(
+            event_id=event_id,
+            model=result.model,
+            severity=result.evaluation.severity,
+            category=result.evaluation.category,
+            explanation=result.evaluation.explanation,
+            raw=result.raw_response,
+            duration_ms=result.duration_ms,
+        )
+
+        # TUI-Update über dieselbe Queue → existierende Row wird aktualisiert
+        try:
+            self.engine.ui_event_queue.put_nowait(
+                (event_id, ev, result.evaluation.severity)
+            )
+        except asyncio.QueueFull:
+            pass
+
+        # Detail-Panel live nachziehen, falls dieses Event gerade angezeigt wird
+        try:
+            feed = self.query_one("#events", EventFeed)
+            if feed.selected_event_id() == event_id:
+                data = self.engine.store.get_event_full(event_id)
+                self.query_one("#details", DetailPanel).show(data)
+        except Exception:
+            pass
+
+        self.notify(
+            f"#{event_id}: sev={result.evaluation.severity} "
+            f"({result.duration_ms} ms, {result.model})",
+            timeout=4,
+        )

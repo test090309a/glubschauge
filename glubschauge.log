@@ -30,3 +30,7 @@
 2026-10-11 02:41:02,494 [WARNING] EVENT #3 [new_host sev=3] Neuer Host im LAN: fe80::10:18ff:fe50:16c0 (02:10:18:50:16:c1)
 2026-10-11 02:41:11,709 [WARNING] EVENT #4 [new_host sev=3] Neuer Host im LAN: 192.168.0.2 (22:37:10:8d:f6:48)
 2026-10-11 02:41:11,972 [WARNING] EVENT #5 [new_host sev=3] Neuer Host im LAN: fe80::101c:44a3:b978:6339 (22:37:10:8d:f6:48)
+2026-10-11 02:45:18,179 [WARNING] EVENT #1 [new_host sev=3] Neuer Host im LAN: 192.168.0.122 (b8:27:eb:92:e8:10)
+2026-10-11 02:45:49,241 [WARNING] EVENT #2 [new_host sev=3] Neuer Host im LAN: fe80::10:18ff:fe50:16c0 (02:10:18:50:16:c1)
+2026-10-11 02:46:45,354 [WARNING] EVENT #3 [new_host sev=3] Neuer Host im LAN: 192.168.0.147 (84:78:8b:80:39:53)
+2026-10-11 02:46:45,380 [WARNING] EVENT #4 [new_host sev=3] Neuer Host im LAN: fe80::c21:c186:8d75:8da3 (84:78:8b:80:39:53)
