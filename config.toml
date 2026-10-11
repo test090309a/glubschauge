@@ -4,34 +4,38 @@ interface   = "8"
 bpf_filter  = "not port 22 and not port 21027"
 
 [network]
-# Alles außerhalb dieser Subnetze ist Transit-Verkehr und wird ignoriert.
 local_subnets = [
   "192.168.0.0/24",
-  "fe80::/10",          # Link-Local (Router-Announcements, NDP)
-  "ff02::/16",          # IPv6 Multicast lokal
-  "224.0.0.0/4",        # IPv4 Multicast lokal (mDNS, SSDP)
+  "fe80::/10",
+  "ff02::/16",
+  "224.0.0.0/4",
 ]
 
-# Bekannte Geräte: werden nie als "neu" gemeldet.
 trusted_hosts = [
-  "00:cb:7a:50:16:c4",  # Router (Vantiva)
-  "34:5a:60:12:61:4c",  # Windows-PC (Micro-Star)
-  # "d8:3a:dd:e2:32:11",  # Raspberry Pi (Kodi ventosus)
-  # "b8:27:eb:92:e8:10",  # Raspberry Pi (Kodi inertia)
-  "70:85:c2:a0:c1:dd",  # ASRock-PC
-  "02:10:18:50:16:c1",  # Router Link-Local
+  "00:cb:7a:50:16:c4",
+  "34:5a:60:12:61:4c",
+  "d8:3a:dd:e2:32:11",
+  "b8:27:eb:92:e8:10",
+  "70:85:c2:a0:c1:dd",
+  "02:10:18:50:16:c1",
 ]
 
 [detectors]
-# new_host_warmup_seconds  = 60
-new_host_warmup_seconds  = 0
-# syn_fan_out_threshold    = 25
-syn_fan_out_threshold    = 5
+new_host_warmup_seconds  = 60
+syn_fan_out_threshold    = 15          # ← von 25 zurück
 syn_fan_out_window_s     = 10
-beaconing_min_samples    = 8
-beaconing_max_jitter_cv  = 0.10
-beaconing_window_minutes = 60
-volume_threshold_mb      = 250.0
+syn_fan_out_cooldown_s   = 300
+syn_fan_out_multi_window_s           = 10
+syn_fan_out_multi_min_targets        = 3
+syn_fan_out_multi_min_distinct_ports = 20
+syn_fan_out_multi_cooldown_s         = 300
+dns_failure_threshold    = 20
+dns_failure_window_s     = 60
+dns_failure_cooldown_s   = 300
+beaconing_min_samples    = 5           # ← von 8 zurück
+beaconing_max_jitter_cv  = 0.15        # ← von 0.10 zurück
+beaconing_window_minutes = 30          # ← von 60 zurück
+volume_threshold_mb      = 250.0       # ← von 1.0 zurück
 volume_window_s          = 60
 
 [ring]
@@ -40,3 +44,20 @@ ring_dir        = "ring"
 file_interval_s = 10
 num_files       = 12
 bpf_filter      = ""
+
+[llm]
+# Entscheider-Pfad (Standard). Auf false setzen für Rollback auf den alten
+# llama3.2:3b-Pfad mit Auto-Eskalation + Trust-the-Rule.
+decision_mode          = true
+decision_model         = "tev1:4b"
+explanation_model      = "llama3.2:3b"
+
+# Schwellen für die Severity-Regel (siehe broker.final_severity)
+scan_threshold         = 0.75
+beaconing_threshold    = 0.70
+internal_threshold     = 0.30
+external_threshold     = 0.70
+internal_beaconing_cap = 3
+
+# Tev1 beim Start vorladen (~20 s einmalig). Auf false bei langsamem Start.
+warmup_on_start        = true

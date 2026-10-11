@@ -1,6 +1,7 @@
 """Datenzugriffsschicht für das Dashboard."""
 from __future__ import annotations
 
+import math
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,21 +13,36 @@ DB_PATH = Path(__file__).resolve().parent.parent / "glubschauge.db"
 _conn: sqlite3.Connection | None = None
 
 
+# --- Status-Logik ---------------------------------------------------------
+
 def host_status(last_seen_iso: str) -> tuple[str, str]:
-    """Liefert (status, color) aus last_seen-ISO-String."""
+    """Liefert (status, color) aus last_seen-ISO-String.
+
+    Verwendet bewusst das stdlib-`datetime` statt pandas, weil pandas 3.x
+    bei tz-aware/naive-Mischungen sehr unterschiedlich reagiert. Alle Werte
+    kommen aus `datetime.isoformat()` und sind damit sauber parsebar.
+    """
     if not last_seen_iso:
         return ("offline", "#6c757d")
     try:
-        ts = pd.Timestamp(last_seen_iso)
+        s = str(last_seen_iso).strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        ts = datetime.fromisoformat(s)
         if ts.tzinfo is None:
-            ts = ts.tz_localize("UTC")
-        delta = (pd.Timestamp.now(tz="UTC") - ts).total_seconds()
+            ts = ts.replace(tzinfo=timezone.utc)
+        delta = (datetime.now(timezone.utc) - ts).total_seconds()
     except Exception:
         return ("offline", "#6c757d")
 
-    if delta < 120:      return ("online",  "#28a745")
-    if delta < 900:      return ("idle",    "#ffc107")
+    if delta < 120:   return ("online",  "#28a745")
+    if delta < 900:   return ("idle",    "#ffc107")
     return ("offline", "#6c757d")
+
+
+def _iso_hours_ago(hours: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+
 
 def get_connection() -> sqlite3.Connection:
     global _conn
@@ -35,10 +51,6 @@ def get_connection() -> sqlite3.Connection:
         _conn.execute("PRAGMA journal_mode=WAL;")
         _conn.row_factory = sqlite3.Row
     return _conn
-
-
-def _iso_hours_ago(hours: int) -> str:
-    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
 
 
 # --- KPIs ----------------------------------------------------------------
@@ -169,10 +181,6 @@ def get_event_timeline(hours: int = 24) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=["hour", "detector", "count"])
 
-    # Robust gegen pandas 3.0:
-    #   1. explizit parsen mit errors="coerce"
-    #   2. tz-aware → tz-naive konvertieren (Plotly arbeitet lieber naiv)
-    #   3. erst dann flooren
     df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
     df = df.dropna(subset=["ts"]).copy()
     if df.empty:
@@ -210,41 +218,91 @@ def get_hosts() -> pd.DataFrame:
         """,
         conn,
     )
-    # Status + Farbe pro Zeile berechnen
     statuses = df["last_seen"].apply(host_status)
     df["status"]       = [s[0] for s in statuses]
     df["status_color"] = [s[1] for s in statuses]
     return df
 
 
+# --- Topologie ------------------------------------------------------------
+
+def _short_vendor(vendor: str, mac: str) -> str:
+    """Kürzt lange Vendor-Namen für die Graph-Labels."""
+    v = (vendor or "").strip()
+    # Klammerzusätze wie "(Router)" entfernen
+    if "(" in v:
+        v = v.split("(")[0].strip()
+    # Umlaute / zu lange Namen kürzen
+    if len(v) > 18:
+        v = v[:16] + "…"
+    if not v:
+        v = mac[:11] if mac else "Unbekannt"
+    return v
+
+
+def _short_ip(ip: str | None) -> str:
+    """Kürzt sehr lange Adressen fürs Label."""
+    if not ip:
+        return "—"
+    if len(ip) > 24:
+        return ip[:22] + "…"
+    return ip
+
+
 def get_topology_elements() -> list[dict]:
+    """Liefert Cytoscape-Elemente mit **stabilen Positionen**.
+
+    Der Router sitzt im Ursprung (0,0), die Hosts werden auf einem Kreis
+    verteilt. Dadurch kann das Dashboard das `preset`-Layout verwenden –
+    ohne Physik-Simulation und ohne Springen bei jedem Refresh.
+    """
     conn = get_connection()
     hosts = conn.execute(
         """
         SELECT h.mac, h.vendor, h.last_seen,
                (SELECT ip FROM hosts WHERE hosts.mac = h.mac
-                  ORDER BY last_seen DESC LIMIT 1) AS primary_ip
+                  ORDER BY (ip LIKE 'fe80:%') ASC, last_seen DESC LIMIT 1) AS primary_ip
         FROM hosts_mac h
+        ORDER BY h.mac
         """
     ).fetchall()
 
     elements: list[dict] = [{
         "data": {"id": "router", "label": "Router", "type": "router"},
         "classes": "router",
+        "position": {"x": 0, "y": 0},
     }]
 
-    for mac, vendor, last_seen, ip in hosts:
+    n = len(hosts)
+    if n == 0:
+        return elements
+
+    radius = 200 if n <= 12 else 260
+
+    for i, (mac, vendor, last_seen, ip) in enumerate(hosts):
         status, _ = host_status(last_seen)
-        node_id = mac or (ip or "unknown")
-        label = f"{vendor or 'Unbekannt'}\n{ip or mac}"
+        node_id = mac or (ip or f"unknown-{i}")
+        label_name = _short_vendor(vendor, mac)
+        label_ip   = _short_ip(ip)
+        label = f"{label_name}\n{label_ip}"
+
+        # Kreis, Start oben (-90°), im Uhrzeigersinn
+        angle = (2 * math.pi * i / n) - (math.pi / 2)
+        x = radius * math.cos(angle)
+        y = radius * math.sin(angle)
+
         elements.append({
             "data": {
-                "id": node_id,
-                "label": label,
-                "vendor": vendor or "",
-                "status": status,
+                "id":        node_id,
+                "label":     label,
+                "vendor":    vendor or "",
+                "ip":        ip or "",
+                "mac":       mac or "",
+                "status":    status,
+                "tooltip":   f"{vendor or 'Unbekannt'}\n{mac}\n{ip or '—'}",
             },
-            "classes": f"host {status}",
+            "classes":  f"host {status}",
+            "position": {"x": x, "y": y},
         })
         elements.append({
             "data": {"source": node_id, "target": "router"},

@@ -7,11 +7,11 @@ import statistics
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
-from .oui import vendor_for
 from typing import Iterable
 
 from .events import Event, EventStore
 from .models import Packet
+from .oui import vendor_for
 
 log = logging.getLogger(__name__)
 
@@ -37,22 +37,16 @@ def _icmp_layer(pkt: Packet) -> dict:
 
 
 def _tcp_flags(pkt: Packet) -> set[str]:
-    """Extrahiert TCP-Flags aus dem tshark ek-JSON.
-
-    Priorität (weil tshark 4.6 unterschiedliche Formate liefert):
-      1. boolesche Einzelfelder  → tcp_tcp_flags_syn, tcp_tcp_flags_ack, ...
-      2. numerischer Wert        → tcp_tcp_flags (Dezimal/Hex)
-      3. String-Wortform         → tcp_tcp_flags_str (nur wenn "Syn"/"Ack" drin)
-    """
+    """Extrahiert TCP-Flags aus dem tshark ek-JSON."""
     tcp = pkt.raw.get("tcp") or {}
 
-    # --- 1. Boolesche Einzelfelder (tshark 4.x, zuverlässigste Quelle) ---
+    # 1. Boolesche Einzelfelder (tshark 4.x, zuverlässigste Quelle)
     bool_map = {
         "syn": "tcp_tcp_flags_syn",
         "ack": "tcp_tcp_flags_ack",
         "fin": "tcp_tcp_flags_fin",
-        "rst": "tcp_tcp_flags_reset",     # tshark nennt es "reset"
-        "psh": "tcp_tcp_flags_push",      # tshark nennt es "push"
+        "rst": "tcp_tcp_flags_reset",
+        "psh": "tcp_tcp_flags_push",
         "urg": "tcp_tcp_flags_urg",
     }
     found_bool = False
@@ -66,7 +60,7 @@ def _tcp_flags(pkt: Packet) -> set[str]:
     if found_bool:
         return flags
 
-    # --- 2. Numerischer Wert ---
+    # 2. Numerischer Wert
     raw = tcp.get("tcp_tcp_flags")
     if raw is not None:
         try:
@@ -87,7 +81,7 @@ def _tcp_flags(pkt: Packet) -> set[str]:
             if v & 0x20: flags.add("urg")
             return flags
 
-    # --- 3. Wortform (nur wenn echte Wörter drin sind) ---
+    # 3. Wortform
     s = tcp.get("tcp_tcp_flags_str")
     if isinstance(s, str):
         sl = s.lower()
@@ -100,23 +94,35 @@ def _tcp_flags(pkt: Packet) -> set[str]:
 
     return set()
 
+def _has_tcp(pkt: Packet) -> bool:
+    """True, wenn das Paket einen TCP-Layer hat – robust gegen
+    tshark-Ketten wie 'eth:ethertype:ip:tcp:tcp.options'."""
+    if "tcp" in pkt.protocols:
+        return True
+    return "tcp" in pkt.raw
+
+
+def _has_icmp(pkt: Packet) -> bool:
+    """True bei ICMP oder ICMPv6."""
+    if "icmp" in pkt.protocols or "icmpv6" in pkt.protocols:
+        return True
+    return "icmp" in pkt.raw or "icmpv6" in pkt.raw
 
 # ---------------------------------------------------------------------------
 # Detektor 1: neuer Host im LAN
 # ---------------------------------------------------------------------------
 
-from .oui import vendor_for   # ← Import oben ergänzen
-
-
 class NewHostDetector(Detector):
-    """Erkennt **neue physische Geräte** (per MAC) im LAN.
+    """Erkennt neue physische Geräte (per MAC) im LAN.
 
-    Wichtig: Wir tracken pro MAC, nicht pro (MAC, IP). Ein iPhone, das
-    durch IPv6-Privacy-Extensions ständig neue IPv6-Adressen bekommt,
-    feuert damit nur EINMAL, nämlich beim ersten Auftauchen.
+    Zusätzlich hält dieser Detector die `last_seen`-Spalten in der DB aktuell,
+    damit das Dashboard einen sinnvollen Online-/Idle-/Offline-Status zeigen
+    kann. Die DB-Writes werden auf ein Intervall von TOUCH_INTERVAL_S
+    gedrosselt, damit bei 1000+ pkts/s nicht die DB zum Flaschenhals wird.
     """
 
     name = "new_host"
+    TOUCH_INTERVAL_S = 30.0   # pro (mac, ip) bzw. pro mac
 
     def __init__(self, store: EventStore, local_subnets: list[str],
                  trusted_macs: list[str] | None = None,
@@ -125,8 +131,12 @@ class NewHostDetector(Detector):
         self.subnets    = [ipaddress.ip_network(s) for s in local_subnets]
         self.trusted    = {m.lower() for m in (trusted_macs or [])}
         self.warmup_end = datetime.now(timezone.utc) + timedelta(seconds=warmup_seconds)
-        # _known_ips: (mac, ip) → zuletzt gesehen. Wird immer aktualisiert.
-        self._known_ips: set[tuple[str, str]] = store.load_hosts()
+
+        # In-Memory-Caches, um DB-Queries pro Paket zu vermeiden
+        self._known_ips:   set[tuple[str, str]] = store.load_hosts()
+        self._known_macs:  set[str]             = store.load_macs()
+        self._last_ip_touch:  dict[tuple[str, str], float] = {}
+        self._last_mac_touch: dict[str, float]             = {}
 
     def _is_local(self, ip_str: str) -> bool:
         try:
@@ -149,20 +159,33 @@ class NewHostDetector(Detector):
         if not self._is_local(ip):
             return
 
-        # (MAC, IP) immer merken – auch wenn kein Event ausgelöst wird
+        now_ts = pkt.timestamp.timestamp()
+
+        # --- Erstkontakt dieser MAC? ---
+        is_new_mac = mac not in self._known_macs
+        vendor     = vendor_for(mac)
+        if is_new_mac:
+            self._known_macs.add(mac)
+            self.store.upsert_mac(mac, vendor, pkt.timestamp)
+
+        # --- (MAC, IP)-Paar pflegen (gedrosselt) ---
         key = (mac, ip)
-        if key not in self._known_ips:
+        is_new_pair = key not in self._known_ips
+        last_ip = self._last_ip_touch.get(key, 0.0)
+        if is_new_pair or (now_ts - last_ip) > self.TOUCH_INTERVAL_S:
             self._known_ips.add(key)
             self.store.remember_host(mac, ip, pkt.timestamp)
+            self._last_ip_touch[key] = now_ts
 
-        # Erstes Mal diese MAC gesehen?
-        if self.store.has_mac(mac):
+        # --- hosts_mac.last_seen pflegen (gedrosselt) ---
+        last_mac = self._last_mac_touch.get(mac, 0.0)
+        if is_new_mac or (now_ts - last_mac) > self.TOUCH_INTERVAL_S:
+            self.store.touch_mac(mac, pkt.timestamp)
+            self._last_mac_touch[mac] = now_ts
+
+        # --- Event nur beim allerersten Auftauchen dieser MAC ---
+        if not is_new_mac:
             return
-
-        vendor = vendor_for(mac)
-        self.store.upsert_mac(mac, vendor, pkt.timestamp)
-
-        # Lernphase?
         if datetime.now(timezone.utc) < self.warmup_end:
             return
         if mac in self.trusted:
@@ -184,62 +207,99 @@ class NewHostDetector(Detector):
 # ---------------------------------------------------------------------------
 
 class DnsFailureDetector(Detector):
-    name = "dns_failure_burst"
-    WINDOW    = timedelta(seconds=60)
-    THRESHOLD = 20
+    """Erkennt Bursts von DNS-Fehlern (ICMP port unreachable).
 
-    def __init__(self) -> None:
+    Cooldown statt permanentem `_alerted`-Set: nach Ablauf des Cooldowns
+    meldet derselbe (src, dst)-Pfad erneut, wenn er immer noch fehlerhaft ist.
+    """
+
+    name = "dns_failure_burst"
+
+    def __init__(
+        self,
+        threshold: int = 20,
+        window_s:  int = 60,
+        cooldown_s: int = 300,
+    ) -> None:
+        self.threshold = threshold
+        self.window    = timedelta(seconds=window_s)
+        self.cooldown  = timedelta(seconds=cooldown_s)
         self._hits: dict[tuple[str, str], deque[datetime]] = defaultdict(deque)
-        self._alerted: set[tuple[str, str]] = set()
+        self._last_alert: dict[tuple[str, str], datetime] = {}
 
     def feed(self, pkt: Packet):
-        if pkt.protocol not in ("icmp", "icmpv6"):
+        if not _has_icmp(pkt):
             return
         icmp = _icmp_layer(pkt)
         if str(icmp.get("icmp_icmp_type")) != "3":
             return
         if str(icmp.get("icmp_icmp_code")) != "3":
             return
+
         key = (pkt.src, pkt.dst)
         now = pkt.timestamp
+
         dq = self._hits[key]
         dq.append(now)
-        cutoff = now - self.WINDOW
+        cutoff = now - self.window
         while dq and dq[0] < cutoff:
             dq.popleft()
-        if len(dq) < self.THRESHOLD or key in self._alerted:
+
+        if len(dq) < self.threshold:
             return
-        self._alerted.add(key)
+
+        last = self._last_alert.get(key)
+        if last is not None and (now - last) < self.cooldown:
+            return
+
+        self._last_alert[key] = now
+
         yield Event(
             detector=self.name, timestamp=now, severity_hint=6,
-            title=f"DNS-Fehler: {pkt.dst} fragt {pkt.src} ({len(dq)}x/60s)",
+            title=f"DNS-Fehler: {pkt.dst} fragt {pkt.src} ({len(dq)}x/"
+                  f"{int(self.window.total_seconds())}s)",
             src=pkt.dst, dst=pkt.src,
-            details={"count": len(dq), "window_s": 60},
+            details={
+                "count": len(dq),
+                "window_s": int(self.window.total_seconds()),
+                "cooldown_s": int(self.cooldown.total_seconds()),
+            },
         )
 
 
 # ---------------------------------------------------------------------------
-# Detektor 3: SYN-Fächer (mit TCP-Debug)
+# Detektor 3: SYN-Fächer
 # ---------------------------------------------------------------------------
 
 class SynFanOutDetector(Detector):
+    """Erkennt SYN-Fächer (Port-Scans, Verbindungsversuche an viele Ports).
+
+    Cooldown statt permanentem `_alerted`-Set: nach Ablauf des Cooldowns
+    meldet derselbe (src, dst)-Pfad erneut, wenn er immer noch aktiv ist.
+    """
+
     name = "syn_fan_out"
 
-    def __init__(self, threshold: int = 15, window_s: int = 10,
-                 debug_first_n: int = 0) -> None: # Debug-Ausgabe für die ersten N TCP-Pakete
+    def __init__(
+        self,
+        threshold: int = 15,
+        window_s:  int = 10,
+        cooldown_s: int = 300,
+        debug_first_n: int = 0,
+    ) -> None:
         self.threshold = threshold
         self.window    = timedelta(seconds=window_s)
+        self.cooldown  = timedelta(seconds=cooldown_s)
         self._hits: dict[tuple[str, str], deque[tuple[datetime, int]]] = defaultdict(deque)
-        self._alerted: set[tuple[str, str]] = set()
+        self._last_alert: dict[tuple[str, str], datetime] = {}
         self._debug_left = debug_first_n
 
     def feed(self, pkt: Packet):
-        if pkt.protocol != "tcp" or pkt.dst_port is None:
+        if not _has_tcp(pkt) or pkt.dst_port is None:
             return
 
         flags = _tcp_flags(pkt)
 
-        # Debug für die ersten 5 TCP-Pakete, egal ob SYN erkannt
         if self._debug_left > 0:
             tcp = pkt.raw.get("tcp") or {}
             log.info("TCP-DEBUG pkt#%d %s:%s → %s:%s flags=%s",
@@ -260,9 +320,14 @@ class SynFanOutDetector(Detector):
         while dq and dq[0][0] < cutoff:
             dq.popleft()
 
-        if len(dq) < self.threshold or key in self._alerted:
+        if len(dq) < self.threshold:
             return
-        self._alerted.add(key)
+
+        last = self._last_alert.get(key)
+        if last is not None and (now - last) < self.cooldown:
+            return
+
+        self._last_alert[key] = now
 
         distinct_ports = {p for _, p in dq}
         severity = 8 if len(distinct_ports) > 20 else 3
@@ -273,8 +338,12 @@ class SynFanOutDetector(Detector):
                    f"({len(dq)} SYNs, {len(distinct_ports)} Ports/"
                    f"{int(self.window.total_seconds())}s)"),
             src=pkt.src, dst=pkt.dst,
-            details={"count": len(dq), "distinct_ports": len(distinct_ports),
-                     "sample_ports": sorted(distinct_ports)[:10]},
+            details={
+                "count": len(dq),
+                "distinct_ports": len(distinct_ports),
+                "sample_ports": sorted(distinct_ports)[:10],
+                "cooldown_s": int(self.cooldown.total_seconds()),
+            },
         )
 
 
@@ -298,7 +367,7 @@ class BeaconingDetector(Detector):
         self._last_alert: dict[tuple[str, str], datetime] = {}
 
     def feed(self, pkt: Packet):
-        if pkt.protocol != "tcp" or pkt.dst_port is None:
+        if not _has_tcp(pkt) or pkt.dst_port is None:
             return
         flags = _tcp_flags(pkt)
         if "syn" not in flags or "ack" in flags:
@@ -364,13 +433,19 @@ class HighVolumeFlowDetector(Detector):
         self._last_alert: dict[tuple, datetime] = {}
 
     def _flow_key(self, pkt: Packet) -> tuple | None:
-        if pkt.src_port is None or pkt.dst_port is None:
+        if pkt.dst_port is None:
             return None
-        return (pkt.src, pkt.src_port, pkt.dst, pkt.dst_port, pkt.protocol)
+        # src_port NICHT im Key: sonst wird jede neue TCP-Verbindung
+        # (neuer ephemerer Quellport) zu einem neuen Flow und derselbe
+        # Transfer feuert dutzende Male.
+        # Protokoll NICHT im Key: tshark klassifiziert dieselbe Verbindung
+        # je nach Dekodierungstiefe als "tcp" oder "tls".
+        return (pkt.src, pkt.dst, pkt.dst_port)
 
     def feed(self, pkt: Packet):
-        if pkt.protocol not in ("tcp", "tls", "http", "https", "quic"):
-            return
+        if not any(p in pkt.protocols for p in ("tcp", "tls", "http", "https", "quic")):
+            if "tcp" not in pkt.raw:
+                return
         key = self._flow_key(pkt)
         if key is None:
             return
@@ -397,4 +472,120 @@ class HighVolumeFlowDetector(Detector):
                      "window_s": int(self.window.total_seconds()),
                      "src_port": pkt.src_port, "dst_port": pkt.dst_port,
                      "protocol": pkt.protocol},
+        )
+
+# ---------------------------------------------------------------------------
+# Detektor 6: Multi-Target SYN-Scan (LAN)
+# ---------------------------------------------------------------------------
+
+class SynFanOutMultiDetector(Detector):
+    """Erkennt Multi-Target-Scans: eine Quelle kontaktiert innerhalb eines
+    kurzen Fensters mehrere verschiedene LAN-Ziele auf vielen verschiedenen
+    Ports mit SYN-Paketen.
+
+    Beispiel aus dem echten Netz:
+        192.168.0.194 → .1, .2, .214, .245
+        auf je 16–25 Ports, alles innerhalb von 3 Sekunden.
+    Das ist die Signatur eines LAN-Scans oder lateraler Bewegung.
+
+    Abgrenzung zu `SynFanOutDetector`: der klassische Detektor feuert
+    PRO (src, dst)-Paar. Wenn ein Host aber vier LAN-Ziele in drei
+    Sekunden scannt, ist der Zusammenhang wichtig – und den sieht nur
+    dieser Detektor.
+
+    Es werden nur Ziele in `local_subnets` gezählt. Scans auf externe
+    IPs (z. B. viele Ports zu einem Microsoft-Server) sind oft legitim
+    und werden hier ignoriert.
+    """
+    name = "syn_fan_out_multi"
+
+    def __init__(
+        self,
+        window_s: int = 10,
+        min_targets: int = 3,
+        min_distinct_ports: int = 20,
+        cooldown_s: int = 300,
+        local_subnets: list[str] | None = None,
+    ) -> None:
+        self.window              = timedelta(seconds=window_s)
+        self.cooldown            = timedelta(seconds=cooldown_s)
+        self.min_targets         = min_targets
+        self.min_distinct_ports  = min_distinct_ports
+        self.subnets             = [ipaddress.ip_network(s) for s in (local_subnets or [])]
+        # pro Quelle: deque von (ts, dst_ip, dst_port)
+        self._hits: dict[str, deque[tuple[datetime, str, int]]] = defaultdict(deque)
+        self._last_alert: dict[str, datetime] = {}
+
+    def _is_local(self, ip_str: str) -> bool:
+        if not self.subnets:
+            return False
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            return False
+        if ip.is_loopback or ip.is_unspecified or ip.is_multicast:
+            return False
+        return any(ip in net for net in self.subnets)
+
+    def feed(self, pkt: Packet):
+        if not _has_tcp(pkt) or pkt.dst_port is None:
+            return
+        flags = _tcp_flags(pkt)
+        if "syn" not in flags or "ack" in flags:
+            return
+        if not self._is_local(pkt.dst):
+            return
+
+        now = pkt.timestamp
+        src = pkt.src
+        dq  = self._hits[src]
+        dq.append((now, pkt.dst, pkt.dst_port))
+        cutoff = now - self.window
+        while dq and dq[0][0] < cutoff:
+            dq.popleft()
+
+        distinct_targets = {t for _, t, _ in dq}
+        distinct_ports   = {p for _, _, p in dq}
+
+        if len(distinct_targets) < self.min_targets:
+            return
+        if len(distinct_ports) < self.min_distinct_ports:
+            return
+
+        last = self._last_alert.get(src)
+        if last is not None and (now - last) < self.cooldown:
+            return
+        self._last_alert[src] = now
+
+        # Severity-Eskalation: mehr Ziele / mehr Ports → härter
+        if len(distinct_targets) >= 5 or len(distinct_ports) >= 100:
+            severity = 8
+        else:
+            severity = 7
+
+        targets_sorted = sorted(distinct_targets)
+        dst_str = (
+            ", ".join(targets_sorted)
+            if len(targets_sorted) <= 3
+            else f"{len(targets_sorted)} Ziele"
+        )
+
+        yield Event(
+            detector=self.name,
+            timestamp=now,
+            severity_hint=severity,
+            title=(f"LAN-Scan: {src} hat {len(distinct_targets)} LAN-Ziele "
+                   f"auf {len(distinct_ports)} Ports in "
+                   f"{int(self.window.total_seconds())}s kontaktiert"),
+            src=src,
+            dst=dst_str,
+            details={
+                "targets":          targets_sorted,
+                "distinct_targets": len(distinct_targets),
+                "distinct_ports":   len(distinct_ports),
+                "total_syns":       len(dq),
+                "sample_ports":     sorted(distinct_ports)[:15],
+                "window_s":         int(self.window.total_seconds()),
+                "cooldown_s":       int(self.cooldown.total_seconds()),
+            },
         )

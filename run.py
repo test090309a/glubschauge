@@ -1,4 +1,4 @@
-"""Phase 6: glubschauge mit Rotation, Härtung und Export."""
+"""glubschauge — Einstiegspunkt TUI."""
 import asyncio
 import logging
 import logging.handlers
@@ -9,6 +9,7 @@ from glubschauge.capture     import TSharkCapture
 from glubschauge.config      import load as load_config
 from glubschauge.detectors   import (
     DnsFailureDetector, NewHostDetector, SynFanOutDetector,
+    SynFanOutMultiDetector,
     BeaconingDetector, HighVolumeFlowDetector,
 )
 from glubschauge.engine      import RuleEngine
@@ -36,10 +37,9 @@ def _setup_logging() -> logging.Logger:
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     ))
     root = logging.getLogger()
-    root.setLevel(logging.WARNING)
+    root.setLevel(logging.INFO)
     root.addHandler(handler)
 
-    # httpx/httpcore-Rauschen unterdrücken
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
@@ -50,7 +50,6 @@ log = _setup_logging()
 
 
 def _excepthook(exc_type, exc_value, exc_tb) -> None:
-    """Wird bei unbehandelten Exceptions aufgerufen – loggen statt stumm sterben."""
     if issubclass(exc_type, KeyboardInterrupt):
         sys.__excepthook__(exc_type, exc_value, exc_tb)
         return
@@ -90,10 +89,23 @@ def main() -> None:
             trusted_macs=cfg.network.trusted_hosts,
             warmup_seconds=cfg.detectors.new_host_warmup_seconds,
         ),
-        DnsFailureDetector(),
+        DnsFailureDetector(
+            threshold=cfg.detectors.dns_failure_threshold,
+            window_s=cfg.detectors.dns_failure_window_s,
+            cooldown_s=cfg.detectors.dns_failure_cooldown_s,
+        ),
         SynFanOutDetector(
             threshold=cfg.detectors.syn_fan_out_threshold,
             window_s=cfg.detectors.syn_fan_out_window_s,
+            cooldown_s=cfg.detectors.syn_fan_out_cooldown_s,
+            debug_first_n=15,
+        ),
+        SynFanOutMultiDetector(
+            window_s=cfg.detectors.syn_fan_out_multi_window_s,
+            min_targets=cfg.detectors.syn_fan_out_multi_min_targets,
+            min_distinct_ports=cfg.detectors.syn_fan_out_multi_min_distinct_ports,
+            cooldown_s=cfg.detectors.syn_fan_out_multi_cooldown_s,
+            local_subnets=cfg.network.local_subnets,
         ),
         BeaconingDetector(
             min_samples=cfg.detectors.beaconing_min_samples,
@@ -121,6 +133,8 @@ def main() -> None:
         llm_queue, store, client,
         stage="filter",
         ui_event_queue=ui_event_queue,
+        llm_config=cfg.llm,
+        local_subnets=cfg.network.local_subnets,
     )
 
     app = GlubschaugeApp(
@@ -128,7 +142,7 @@ def main() -> None:
         worker=worker,
         capture=capture,
         ringbuffer=ringbuffer,
-        reports_dir=BASE_DIR / "reports",      # ← NEU: für Export
+        reports_dir=BASE_DIR / "reports",
     )
     app.run()
 

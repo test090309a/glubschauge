@@ -1,7 +1,5 @@
-📋 Folgeprompt für einen Agenten – glubschauge
-
-Du übernimmst die Weiterentwicklung eines Python-Projekts namens glubschauge – ein TUI-basierter Netzwerk-Monitor mit lokaler KI. Hier ist der komplette Zustand.
-1. Projektziel
+Folgeprompt für den nächsten Agenten – glubschauge (Stand 2026-10-11, ~12:00)
+1. Projektziel (unverändert)
 
 Ein dauerhaft laufendes Monitoring-Tool für ein Heimnetzwerk auf Windows 11, das:
 
@@ -17,222 +15,353 @@ Ein dauerhaft laufendes Monitoring-Tool für ein Heimnetzwerk auf Windows 11, da
 
     Optional: Wireshark-Sprung bei Events (Ringpuffer), Markdown-Export
 
-Motivation des Nutzers: Privatsphäre – kein Cloud-LLM, alles lokal. Perspektivisch möchte der Nutzer "professionelle" Netzwerküberwachung im Heimnetz.
-2. Hardware/Umgebung
+Motivation: Privatsphäre – kein Cloud-LLM, alles lokal.
+2. Hardware/Umgebung (unverändert)
 Komponente	Wert
 OS	Windows 11 Build 26300
 GPU	NVIDIA RTX 3060, 12 GB VRAM
 RAM	64 GB
 Python	3.12.10
-tshark	Wireshark 4.6.9, Pfad M:\Wireshark\tshark.exe
-Interface	Index 8 ("Ethernet", Realtek 2.5GbE)
-Ollama	Port 11434, Modelle: llama3.2:3b, llama3.1:8b, qwen2.5-coder:14b, qwen2.5-coder:1.5b-base, weitere
+tshark	Wireshark 4.6.9, M:\Wireshark\tshark.exe
+Interface	Index 8 (Realtek 2.5GbE)
+Ollama	Port 11434, Modelle: llama3.2:3b, llama3.1:8b, qwen2.5-coder:14b
 Projekt-Pfad	M:\projekte_2026\glubschauge
 Git	Repo initialisiert, noch nichts committet
-3. Verzeichnisstruktur (aktuell)
-text
+3. Aktueller Funktionsumfang (verifiziert)
+3.1 Detektoren
+Detektor	Status	Verifiziert durch
+new_host (MAC-basiert, OUI-Vendor)	✅	Events #1–#4
+dns_failure_burst	✅	seit DNS-Fix ruhig
+syn_fan_out (pro Ziel)	✅	Event #7 (sev=8 bei 23 Ports)
+syn_fan_out_multi (mehrere LAN-Ziele)	✅	Event #13 (sev=7, 2 Ziele)
+beaconing	✅	Event #36 (sev=7, CV=0.00)
+high_volume	✅	Event #40 (sev=3)
 
-M:\projekte_2026\glubschauge\
-├── .git\
-├── .venv\                          (falls angelegt)
-├── glubschauge\                    ← Python-Package
-│   ├── __init__.py
-│   ├── broker.py                   Prompt-Bau + Model-Router
-│   ├── capture.py                  TSharkCapture (asynchron)
-│   ├── config.py                   TOML-Loader
-│   ├── detectors.py                5 Detektoren
-│   ├── engine.py                   RuleEngine (Capture → Detektoren)
-│   ├── events.py                   Event + EventStore (SQLite)
-│   ├── exporter.py                 Markdown-Report-Export
-│   ├── llm.py                      Ollama-Client (async)
-│   ├── models.py                   Packet-Dataclass
-│   ├── oui.py                      MAC-Vendor-Lookup
-│   ├── ringbuffer.py               Zweiter tshark für pcapng-Ringpuffer
-│   ├── tui.py                      Textual-TUI
-│   └── worker.py                   LLM-Worker
-├── dashboard\                      ← Dash-Weboberfläche
-│   ├── app.py                      Dash-App (use_pages=True, Port 8050)
-│   ├── data.py                     Datenzugriffsschicht (SQLite → pandas)
-│   ├── assets\style.css
-│   ├── components\
-│   │   ├── __init__.py
-│   │   ├── event_feed.py
-│   │   ├── header.py
-│   │   ├── host_inventory.py
-│   │   └── kpi_cards.py
-│   └── pages\
-│       ├── __init__.py
-│       ├── events.py
-│       ├── hosts.py
-│       ├── overview.py
-│       └── reports.py
-├── ring\                           tshark-Ringpuffer (rotierende pcapng)
-├── reports\                        Markdown-Reports aus der TUI
-├── config.toml
-├── glubschauge.db                  SQLite-Datenbank
-├── glubschauge.log                 rotierendes Log (5 MB × 3)
-├── inspect_events.py               Kleines CLI-Tool
-├── run.py                          Einstieg TUI
-├── START.bat                       Startscript (TUI + Dashboard)
-└── STOP.bat                        Stopscript
+Alle 6 Detektoren feuern real und korrekt.
+3.2 LLM-Worker
 
-4. Datenbank-Schema (glubschauge.db)
+    Auto-Eskalation (ESCALATE_HINT = 7): Regel-Hint ≥ 7 → llama3.1:8b statt llama3.2:3b
 
-Wichtig: Foreign Keys wurden entfernt, weil sie das executescript zerbrachen.
-sql
+    Trust-the-Rule (TRUST_RULE_HINT = 7): final_severity = max(severity_hint, llm_severity) — weil kleine Modelle bei Port-Scans zu lasch bewerten
 
-CREATE TABLE events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts TEXT NOT NULL,
-    detector TEXT NOT NULL,
-    severity_hint INTEGER NOT NULL,
-    title TEXT NOT NULL,
-    src TEXT DEFAULT '',
-    dst TEXT DEFAULT '',
-    details_json TEXT DEFAULT '{}'
-);
+    Beides verifiziert via test_worker.py: Event mit hint=8 → Modell llama3.1:8b, Severity 8
 
-CREATE TABLE hosts (              -- (MAC, IP)-Paare
-    mac TEXT NOT NULL,
-    ip TEXT NOT NULL,
-    first_seen TEXT NOT NULL,
-    last_seen TEXT NOT NULL,
-    PRIMARY KEY (mac, ip)
-);
+3.3 Capture-Pipeline
 
-CREATE TABLE hosts_mac (          -- MAC-Stammdaten
-    mac TEXT PRIMARY KEY,
-    vendor TEXT DEFAULT '',
-    first_seen TEXT NOT NULL,
-    last_seen TEXT NOT NULL
-);
+    _normalize_protocols(): tcp.options → tcp, tls.record → tls, Duplikate entfernt
 
-CREATE TABLE event_evaluations (
-    event_id INTEGER PRIMARY KEY,
-    model TEXT NOT NULL,
-    severity INTEGER NOT NULL,
-    category TEXT NOT NULL,
-    explanation TEXT NOT NULL,
-    raw_json TEXT DEFAULT '{}',
-    duration_ms INTEGER DEFAULT 0,
-    ts TEXT NOT NULL
-);
+    Prioritätsliste statt Fallback auf letztes Element
 
-5. Was funktioniert (verifiziert)
-Feature	Status
-tshark-Capture via -T ek + Streaming-Parser	✅
-new_host-Detektor (MAC-basiert, OUI-Vendor)	✅
-dns_failure_burst-Detektor	✅ (seit DNS-Fix ruhig)
-syn_fan_out-Detektor	✅ (verifiziert mit Event)
-beaconing-Detektor	✅ implementiert, noch nicht real gefeuert
-high_volume-Detektor	✅ implementiert, noch nicht real gefeuert
-LLM-Bewertung via Ollama (3B Filter, 8B Analyze, 14B Forensic)	✅
-Textual-TUI mit Filter, Detail-Panel, Wireshark-Sprung, Re-Analyse, Export	✅
-SQLite-Persistenz inkl. hosts_mac	✅
-MAC-Vendor-Lookup	✅ (Apple, Raspberry Pi, Vantiva, Micro-Star, ASRock, ...)
-Hosts-Tabelle (h-Taste)	✅
-Markdown-Export (e-Taste)	✅
-Log-Rotation	✅
-Absoluter Pfad-Aufruf (von überall)	✅
-Ringpuffer + Wireshark-Sprung (w)	✅ (Snapshot verifiziert mit Paketen)
-Dash-Dashboard mit 4 Seiten	✅ (Timeline-Chart hatte Bug)
-6. Bekannte offene Bugs / Punkte
+    Fallback auf Layer-Präsenz: wenn tcp in layers aber nicht in protocols → protocol = "tcp"
 
-    dashboard/pages/overview.py → _update_timeline: Der Fix für pandas 3.0 (Zeitzonen) wurde vorgeschlagen, aber nicht verifiziert. Die aktuelle get_event_timeline() in data.py muss robust gegen tz-aware datetime sein:
-    python
+    Detektoren prüfen via _has_tcp(pkt) / _has_icmp(pkt) auf pkt.protocols und pkt.raw — robust gegen tshark-Varianten
 
-    df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
-    df = df.dropna(subset=["ts"]).copy()
-    df["hour"] = df["ts"].dt.tz_convert("UTC").dt.tz_localize(None).dt.floor("h")
+3.4 TUI (Textual)
 
-    Außerdem: Der Callback sollte try/except enthalten und Fehler direkt im Chart-annotation-Text anzeigen.
+    Alle Bindings funktionieren (q, c, d, w, s, r, R, e, h)
 
-    START.bat: Klammer-Bug behoben ((Tray-Icon) in echo innerhalb if-Blocks). Korrigierte Version siehe unten. Nicht verifiziert.
+    Hosts-Tabelle mit gedrosselten touch_mac()-Updates (30 s Intervall)
 
-    hosts_mac-Event-Zähler in EventStore.list_hosts() nutzt WHERE title LIKE '%' || mac || '%' – funktioniert, ist aber unschön.
+    Filter, Detail-Panel, Wireshark-Sprung, Re-Analyse, Export
 
-    Dashboard-Startseite – der Timeline-Chart zeigt möglicherweise noch nichts (siehe Punkt 1).
+    ⚠️ Escape-Falle in Command-Palette (P1.7, offen)
 
-    Escape-Falle: Textual Help-Overlay (Command Palette) blockiert manchmal. Nutzer muss Escape drücken.
+3.5 Dashboard (Dash)
 
-7. Detektor-Konfiguration (Dauerbetrieb)
+    4 Seiten: Übersicht, Hosts, Events, Reports — alle laden
 
-In config.toml:
+    Timeline-Chart ✅ (Event #sichtbar, Achsen + Legende + Hover korrekt)
+
+    Topologie ✅ (stabile Position via preset-Layout, kein Springen mehr)
+
+    Host-Status ✅ (online/idle/offline via host_status() in stdlib datetime)
+
+    Nur-LAN-Ziele zählen bei syn_fan_out_multi
+
+4. Wichtige Änderungen dieser Session (was neu ist)
+4.1 glubschauge/capture.py
+
+    _normalize_protocols() neu
+
+    Priority-Liste statt Fallback
+
+    Fallback auf Layer-Präsenz
+
+    _extract_endpoints() robust
+
+4.2 glubschauge/detectors.py
+
+    _has_tcp(pkt) und _has_icmp(pkt) Helper
+
+    DnsFailureDetector: Cooldown statt _alerted-Set
+
+    SynFanOutDetector: Cooldown statt _alerted-Set
+
+    SynFanOutMultiDetector: neuer Detektor (Multi-Target-LAN-Scan)
+
+    HighVolumeFlowDetector._flow_key(): Protokoll NICHT mehr im Key (Doppel-Event-Fix)
+
+    NewHostDetector: gedrosselte touch_mac()-Updates alle 30 s
+
+4.3 glubschauge/events.py
+
+    load_macs() neu
+
+    touch_mac(mac, ts) neu
+
+4.4 glubschauge/worker.py
+
+    ESCALATE_HINT = 7
+
+    TRUST_RULE_HINT = 7
+
+    _choose_model(ev) und _final_severity(ev, llm_severity) neu
+
+    Log-Zeilen zeigen Regel-Hint, LLM-Wert, final-Wert
+
+4.5 glubschauge/broker.py
+
+    SYSTEM_PROMPT um Scan-Regeln erweitert:
+
+        syn_fan_out mit >15 Ports NIE < 6
+
+        syn_fan_out_multi IMMER 7–9, security
+
+        "Verdächtig aber unklar" ist keine gültige Erklärung für Port-Scans
+
+4.6 dashboard/data.py
+
+    host_status() in stdlib datetime statt pandas (robust gegen tz-Mismatch)
+
+    _short_vendor(), _short_ip() für Topologie-Labels
+
+    get_topology_elements(): Positionen serverseitig berechnet (Kreis um Router)
+
+4.7 dashboard/pages/hosts.py
+
+    Layout: preset, animate: False → kein Springen mehr
+
+    Zwei Intervalle: Tabelle alle 5 s, Topologie alle 20 s
+
+    Labels reduziert: nur Vendor + IP, text-valign: bottom
+
+4.8 dashboard/pages/overview.py
+
+    _update_timeline: plot_bgcolor="#0d0d0d" und paper_bgcolor="#0d0d0d" (war rgba(0,0,0,0) — Text war unsichtbar auf hellem Card-Body)
+
+    Achsen: tickformat="%d.%m. %H:%M", dtick=3600000, Y-Achse dtick=2
+
+    Achsentitel + Hover-Template
+
+4.9 config.toml (Testwerte → zurückzusetzen!)
+
+Nach den Verifikations-Tests stehen aktuell noch Testwerte drin. Beim Start der neuen Session zuerst prüfen:
 toml
 
 [detectors]
 new_host_warmup_seconds  = 60
-syn_fan_out_threshold    = 25
+syn_fan_out_threshold    = 25        # ← nicht 5
 syn_fan_out_window_s     = 10
-beaconing_min_samples    = 8
-beaconing_max_jitter_cv  = 0.10
-beaconing_window_minutes = 60
-volume_threshold_mb      = 250.0
+syn_fan_out_cooldown_s   = 300
+syn_fan_out_multi_window_s           = 10
+syn_fan_out_multi_min_targets        = 3
+syn_fan_out_multi_min_distinct_ports = 20
+syn_fan_out_multi_cooldown_s         = 300
+dns_failure_threshold    = 20
+dns_failure_window_s     = 60
+dns_failure_cooldown_s   = 300
+beaconing_min_samples    = 8         # ← nicht 5
+beaconing_max_jitter_cv  = 0.10      # ← nicht 0.20
+beaconing_window_minutes = 60        # ← nicht 10
+volume_threshold_mb      = 250.0     # ← nicht 50.0 oder 1.0
 volume_window_s          = 60
 
-Realitäts-Check: Bei dieser Konfiguration feuern die Detektoren selten (Absicht). Zum Testen kurzzeitig auf syn_fan_out_threshold = 5, volume_threshold_mb = 1.0, new_host_warmup_seconds = 0 senken und eine MAC aus trusted_hosts entfernen.
+In run.py auch root.setLevel(logging.WARNING) setzen (nicht INFO).
+5. Bekannte Bugs / Eigenheiten
+5.1 Aktiv (offen)
+#	Problem	Datei	Aufwand
+P0.2	Event-Zähler pro MAC via WHERE title LIKE '%mac%' — langsam und unpräzise	events.py::list_hosts, data.py::get_hosts/get_top_hosts	mittel
+P1.7	Escape-Falle in Textual Command-Palette	tui.py	klein
+P2.E	Keine Retention-Policy — DB wächst unbegrenzt	events.py, run.py	klein
+5.2 Bewusst akzeptiert
 
-trusted_hosts enthält aktuell:
-toml
+    ESCALATE_HINT/TRUST_RULE_HINT bei 7 — könnte man konfigurierbar machen
 
-trusted_hosts = [
-  "00:cb:7a:50:16:c4",  # Router Vantiva
-  "34:5a:60:12:61:4c",  # Windows-PC
-  "d8:3a:dd:e2:32:11",  # Pi ventosus
-  "b8:27:eb:92:e8:10",  # Pi inertia
-  "70:85:c2:a0:c1:dd",  # ASRock-PC
-  "02:10:18:50:16:c1",  # Router Link-Local
-]
+    Test-Events #1–#40 liegen noch in der DB — vor Produktivstart aufräumen
 
-Bekannte Geräte im Netzwerk:
+    Erste Git-Commit steht noch aus
 
-    Router 192.168.0.1 (Vantiva)
+6. Kritische Lessons Learned (diese Session)
+6.1 tshark-spezifisch (NEU)
 
-    Windows-PC 192.168.0.194 (Micro-Star, 2.5GbE)
+    frame_protocols kann tcp.options enthalten, nicht nur tcp → Protocol-Klassifizierung muss normalisieren
 
-    Raspberry Pi 192.168.0.122 (Kodi inertia)
+    tshark liefert tcp_tcp_flags_syn als Boolean, nicht _str — aber _str ist bei 4.6 ASCII-Art (unbrauchbar)
 
-    Raspberry Pi 192.168.0.245 (Kodi ventosus, LibreELEC)
+    tcp.options-Layer ist bei jedem SYN mit MSS/SACK/Timestamps vorhanden — das ist der Standardfall, nicht die Ausnahme
 
-    iPhone 192.168.0.2 (MAC 22:37:10:8d:f6:48, randomisiert)
+6.2 Windows-spezifisch (NEU)
 
-    iPhone 192.168.0.147 (MAC 84:78:8b:80:39:53, Apple OUI)
+    connect_ex auf eigenen PC (127.0.0.1 oder eigene LAN-IP) läuft über Loopback → tshark sieht die Pakete nicht
 
-    Redmi Note 14 192.168.0.214 (MAC c2:20:7b:c0:f6:fd, randomisiert)
+    Windows drosselt SYN-Ausgaben an dasselbe Ziel, wenn RST noch im Stack liegt → Multi-Target-Test nötig
 
-    ASRock-PC 192.168.0.234
+    Windows Firewall blockt manche Ports ausgehend (20–24, 25, 135, 137–139, 445) → hohe Ports (8000+) verwenden
 
-8. Kritische Lessons Learned (Fallstricke)
+    PowerShell + SQL-Quotes sind ein Minenfeld — SQL immer als .py-Datei ausführen
 
-Diese Fehler sind bereits aufgetreten – ein neuer Agent sollte sie kennen:
-8.1 tshark-spezifisch
+6.3 Python/asyncio (aus alter Session, weiter gültig)
 
-    -T ek liefert 2 Zeilen pro Paket: Erst Index-Header, dann Paket-JSON. Der Parser muss Index-Header ignorieren (if "index" in obj).
+    asyncio.create_task() in run_until_complete → Tasks werden gecancelt
 
-    TCP-Flags: tshark 4.6 liefert boolesche Felder (tcp_tcp_flags_syn, tcp_tcp_flags_reset, tcp_tcp_flags_push – nicht _rst/_psh). Der Parser muss diese zuerst probieren, dann erst tcp_tcp_flags_str (das ist bei tshark 4.6 ASCII-Art wie ·······A···· und nutzlos).
+    run_worker(..., exclusive=True) killt alle Worker derselben Gruppe
 
-    -l ist Pflicht für Live-Ausgabe, sonst puffert tshark minutenlang.
+    self.run_worker(self._foo(), ...) — Klammern nicht vergessen
 
-    Interface per Index statt Name ansprechen (-i 8), weil Namen Sonderzeichen enthalten können.
+6.4 Textual (aus alter Session, weiter gültig)
 
-8.2 Python/asyncio
+    add_columns + columns["a"].width klappt nicht in allen Versionen
 
-    asyncio.create_task() in einer async def die via run_until_complete aufgerufen wird: Tasks werden gecancelt, wenn der Loop endet. Lösung: Alle Tasks im on_mount() der Textual-App starten.
+    cursor_row ist Index, nicht RowKey
 
-    Textual run_worker(..., exclusive=True) killt alle anderen Worker derselben Gruppe – nicht ohne group= verwenden.
+    update_cell braucht die echte ColumnKey
 
-    self.run_worker(self._foo(), ...) muss aufgerufen werden (Klammern), nicht als Methodenreferenz übergeben.
+6.5 SQLite (aus alter Session, weiter gültig)
 
-8.3 Textual
+    Schema-Updates: nach Änderung glubschauge.db löschen
 
-    add_columns("a", "b") + self.columns["a"].width funktioniert nicht in allen Versionen. Stattdessen add_column("a", width=…).
+    Foreign Keys wurden entfernt
 
-    cursor_row liefert Index, nicht RowKey. Aktuellen Event per on_data_table_row_highlighted tracken.
+6.6 LLM-Pipeline (NEU)
 
-    update_cell(row_key, column_key, ...) braucht die echte ColumnKey (Rückgabe von add_column).
+    3B-Filter ist bei Port-Scans unzuverlässig: liefert severity 3 trotz 25 Ports. Auto-Eskalation + Trust-the-Rule lösen das.
 
-8.4 SQLite
+    8B ist zuverlässiger, aber nicht perfekt: bei 25 Ports kommt oft 8 oder 9 — deutlich besser als 3B.
 
-    Schema-Updates: Beim Einfügen neuer CREATE TABLE-Statements in SCHEMA kann ein Fehler mittendrin den Rest verschlucken (deshalb fehlte hosts). Nach Schema-Änderungen immer glubschauge.db löschen.
+    max_tokens=200 reicht, format="json" erzwingt strukturierte Ausgabe
 
-    Foreign Keys wurden entfernt – waren die Ursache.
+6.7 Debug-Strategie (NEU)
+
+    test_worker.py-Muster ist der beste Debug-Hebel: synthetisches Event direkt einspeisen, DB-Ergebnis prüfen. Umgeht Netzwerk, Firewall, Timing.
+
+    TCP-DEBUG-Log-Zeile (mit debug_first_n im Detector) ist Gold wert für Protocol-Klassifizierungs-Probleme.
+
+    Windows PowerShell findstr /C:"..." statt findstr "..." — sonst wird Leerzeichen als OR interpretiert.
+
+7. Nächste Schritte (empfohlene Reihenfolge)
+A. Retention-Policy (P2.E) — 30 min
+
+Ziel: DB wächst nicht unbegrenzt.
+
+    In EventStore: neue Methode prune(retention_days: int) -> int
+
+        DELETE FROM events WHERE ts < (now - retention_days)
+
+        DELETE FROM event_evaluations WHERE event_id NOT IN (SELECT id FROM events)
+
+        Rückgabe: Anzahl gelöschter Events
+
+    In config.toml: [storage] retention_days = 90
+
+    In run.py: Background-Task in GlubschaugeApp.on_mount(), der alle 6 h aufräumt
+
+    Optional: wöchentliches VACUUM in derselben Methode
+
+B. Event-Zähler-Refactor (P0.2) — 1 h
+
+Ziel: Host-Event-Zähler ohne title LIKE '%mac%'.
+
+    ALTER TABLE events ADD COLUMN mac TEXT + Index idx_events_mac
+
+    Event.to_row() erweitern um mac (aus details.get("mac"))
+
+    list_hosts() / get_hosts() / get_top_hosts(): WHERE events.mac = h.mac
+
+    Migrationsskript: einmalig title parsen und mac nachtragen
+
+C. Escape-Falle Textual (P1.7) — klein
+
+    Prüfen, ob App.BINDINGS das escape-Binding der Command-Palette überschreibt
+
+    Fallback: escape → action_focus_next oder ähnliches
+
+D. Git-Commit
+
+    .gitignore schreiben: .venv/, *.db, ring/, reports/, snapshot_*.pcapng, glubschauge.log*
+
+    git add . und git commit -m "Initial commit: glubschauge mit 6 verifizierten Detektoren"
+
+8. Wiederverwendbare Testwerkzeuge
+
+Diese Dateien wurden in der Session erstellt und haben sich bewährt (können jederzeit neu erzeugt werden):
+8.1 test_worker.py — Worker-Direkttest
+
+Synthetisches Event mit severity_hint=8 durch den echten Worker schicken, DB-Ergebnis prüfen. Verifiziert Auto-Eskalation + Trust-the-Rule.
+8.2 beacon_test.py — Beaconing-Simulation
+
+Alle 6 s eine Verbindung zu 1.1.1.1:443. 6 Samples → Detektor feuert mit CV ≈ 0.
+8.3 volume_test.py — High-Volume-Simulation
+
+Download von https://nbg1-speed.hetzner.com/100MB.bin (100 MB, ~6 s bei 15 MB/s). Achtung: speed.cloudflare.com blockt mit 403, speed.hetzner.de löst manchmal nicht auf.
+8.4 check_hv.py — High-Volume DB-Check
+
+Query gegen events WHERE detector='high_volume'.
+
+Für neue Sessions: Bei Bedarf neu erzeugen, nach Gebrauch löschen.
+9. Wichtige Pfade
+text
+
+M:\projekte_2026\glubschauge\
+├── glubschauge\           Python-Package
+│   ├── capture.py         tshark-Subprozess + Parser
+│   ├── detectors.py       6 Detektoren
+│   ├── events.py          SQLite-Schema + EventStore
+│   ├── worker.py          LLM-Worker mit Auto-Eskalation
+│   ├── broker.py          Prompt + Model-Router
+│   ├── tui.py             Textual-App
+│   ├── engine.py          RuleEngine
+│   ├── exporter.py        Markdown-Export
+│   ├── ringbuffer.py      Ringpuffer + Wireshark-Sprung
+│   ├── llm.py             Ollama-Client
+│   ├── config.py          TOML-Loader
+│   ├── models.py          Packet-Dataclass
+│   └── oui.py             MAC-Vendor-Lookup
+├── dashboard\             Dash-Weboberfläche
+│   ├── app.py             Port 8050
+│   ├── data.py            SQLite → pandas
+│   ├── pages\
+│   │   ├── overview.py    KPIs, Charts, Timeline
+│   │   ├── hosts.py       Topologie + Inventar
+│   │   ├── events.py      Filter + Liste
+│   │   └── reports.py     Markdown-Reports
+│   └── components\
+├── ring\                  pcapng-Ringpuffer
+├── reports\               Markdown-Reports
+├── config.toml
+├── glubschauge.db
+├── glubschauge.log
+├── run.py                 Einstieg TUI
+├── inspect_events.py      CLI-Tool
+├── START.bat / STOP.bat   (unwichtig laut User)
+
+10. Ziel für die nächste Session
+
+Primär: Retention-Policy einbauen (verhindert DB-Wachstum).
+
+Sekundär: Event-Zähler-Refactor (Performance + Korrektheit).
+
+Optional: Ersten Git-Commit machen (Sicherungspunkt).
+
+Rahmenbedingungen:
+
+    Kein Cloud-LLM, alles bleibt lokal
+
+    Änderungen immer mit Test verifizieren (siehe 8.1–8.4 als Muster)
+
+    Bei Schema-Änderungen: DB vorher sichern oder löschen
+
+    Windows/PowerShell-Eigenheiten beachten (siehe 6.2)
+
+    Bei Debug: erst Daten sammeln (TCP-DEBUG, test_worker.py), dann fixen
+
+Was NICHT mehr nötig ist: Detektor-Logik, Capture-Parser, LLM-Pipeline, Dashboard-Charts — alles verifiziert und stabil.

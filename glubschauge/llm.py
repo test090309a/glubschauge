@@ -1,4 +1,9 @@
-"""Async Ollama-Client für glubschauge."""
+"""Async Ollama-Client für glubschauge.
+
+Zwei Endpunkte:
+  * /api/generate      → Chat-Modell (Legacy-Pfad + Erklärung)
+  * /v1/systemone      → Decision-Modell Tev1 (Severity/Category/Flags)
+"""
 from __future__ import annotations
 
 import json
@@ -32,36 +37,49 @@ class LlmResult:
     duration_ms: int
 
 
-class OllamaClient:
-    """Dünner async Wrapper um /api/generate."""
+@dataclass(slots=True)
+class DecisionResult:
+    model: str
+    answers: dict
+    raw_response: str
+    duration_ms: int
 
-    def __init__(self, base_url: str = "http://localhost:11434", timeout_s: float = 60.0) -> None:
+
+class OllamaClient:
+    """Dünner async Wrapper um /api/generate und /v1/systemone."""
+
+    def __init__(self, base_url: str = "http://localhost:11434",
+                 timeout_s: float = 60.0) -> None:
         self.base_url = base_url.rstrip("/")
         self._client = httpx.AsyncClient(timeout=timeout_s)
 
     async def close(self) -> None:
         await self._client.aclose()
 
+    # ------------------------------------------------------------------
+    # Chat-Pfad (Legacy + Erklärung)
+    # ------------------------------------------------------------------
+
     async def evaluate(
         self,
         model: str,
         prompt: str,
         system: str | None = None,
-        max_tokens: int = 120,         # ← war 200
-        keep_alive: str = "24h",       # ← neu
+        max_tokens: int = 120,
+        keep_alive: str = "24h",
     ) -> LlmResult:
         payload: dict = {
             "model": model,
             "prompt": prompt,
             "stream": False,
             "format": "json",
-            "keep_alive": keep_alive,   # ← neu
+            "keep_alive": keep_alive,
             "options": {
                 "temperature": 0.1,
                 "num_predict": max_tokens,
-                "num_ctx": 2048,        # ← neu: begrenzt Kontextfenster
+                "num_ctx": 2048,
             },
-        }        
+        }
         if system:
             payload["system"] = system
 
@@ -88,4 +106,75 @@ class OllamaClient:
             evaluation=evaluation,
             raw_response=raw,
             duration_ms=duration_ms,
+        )
+
+    async def explain(
+        self,
+        prompt: str,
+        system: str,
+        model: str = "llama3.2:3b",
+        max_tokens: int = 120,
+        keep_alive: str = "24h",
+    ) -> tuple[str, int]:
+        """Freitext-Erklärung. Rückgabe: (text, duration_ms)."""
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "system": system,
+            "stream": False,
+            "keep_alive": keep_alive,
+            "options": {
+                "temperature": 0.3,
+                "num_predict": max_tokens,
+                "num_ctx": 1024,
+            },
+        }
+        t0 = time.monotonic()
+        try:
+            r = await self._client.post(
+                f"{self.base_url}/api/generate", json=payload
+            )
+            r.raise_for_status()
+            data = r.json()
+            dt_ms = int((time.monotonic() - t0) * 1000)
+            text = (data.get("response") or "").strip()
+            return text, dt_ms
+        except Exception as e:
+            log.warning("explain() fehlgeschlagen: %s", e)
+            dt_ms = int((time.monotonic() - t0) * 1000)
+            return "", dt_ms
+
+    # ------------------------------------------------------------------
+    # Decision-Pfad (Tev1)
+    # ------------------------------------------------------------------
+
+    async def decide(
+        self,
+        state: str,
+        questions: dict,
+        model: str = "tev1:4b",
+        keep_alive: str = "24h",
+    ) -> DecisionResult:
+        """Ruft /v1/systemone auf. Rückgabe enthält die 'answers'."""
+        payload = {
+            "model": model,
+            "state": state,
+            "questions": questions,
+            "keep_alive": keep_alive,
+        }
+        t0 = time.monotonic()
+        r = await self._client.post(
+            f"{self.base_url}/v1/systemone", json=payload,
+            timeout=120.0,
+        )
+        r.raise_for_status()
+        data = r.json()
+        dt_ms = int((time.monotonic() - t0) * 1000)
+
+        answers = data.get("answers") or data.get("responses") or {}
+        return DecisionResult(
+            model=model,
+            answers=answers,
+            raw_response=json.dumps(data, ensure_ascii=False),
+            duration_ms=dt_ms,
         )

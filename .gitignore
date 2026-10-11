@@ -5,6 +5,32 @@ glubschauge.db
 glubschauge.log
 glubschauge.db-shm
 glubschauge.db-wal
+tests/*
 
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
 
+# Datenbank & Logs
+*.db
+*.db-wal
+*.db-shm
+glubschauge.log*
 
+# Ringpuffer
+ring/
+*.pcapng
+
+# Reports & Snapshots
+reports/
+snapshot_*.pcapng
+
+# IDE
+.vscode/
+.idea/
+
+# Test-Skripte (temporär)
+test_*.py
+cleanup.py

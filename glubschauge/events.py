@@ -112,6 +112,11 @@ class EventStore:
         cur = self._conn.execute("SELECT mac, ip FROM hosts")
         return {(mac, ip) for mac, ip in cur.fetchall()}
 
+    def load_macs(self) -> set[str]:
+        """Alle bekannten MACs (für In-Memory-Cache im Detector)."""
+        cur = self._conn.execute("SELECT mac FROM hosts_mac")
+        return {row[0] for row in cur.fetchall()}
+
     def remember_host(self, mac: str, ip: str, ts: datetime) -> None:
         iso = ts.isoformat()
         self._conn.execute(
@@ -134,6 +139,18 @@ class EventStore:
             " VALUES (?, ?, ?, ?)"
             " ON CONFLICT(mac) DO UPDATE SET last_seen = excluded.last_seen",
             (mac, vendor, iso, iso),
+        )
+        self._conn.commit()
+
+    def touch_mac(self, mac: str, ts: datetime) -> None:
+        """Nur last_seen aktualisieren – kein INSERT, kein Vendor-Update.
+
+        Wird vom Detector gedrosselt aufgerufen (1x/30s pro MAC), damit der
+        Online-Status im Dashboard live bleibt, ohne die DB zu fluten.
+        """
+        self._conn.execute(
+            "UPDATE hosts_mac SET last_seen = ? WHERE mac = ?",
+            (ts.isoformat(), mac),
         )
         self._conn.commit()
 
@@ -212,10 +229,7 @@ class EventStore:
         }
 
     def list_events_filtered(self, min_severity: int = 0, limit: int = 1000) -> list[dict]:
-        """Alle Events mit LLM-Bewertung, gefiltert nach effektiver Severity.
-
-        Effektive Severity = LLM-Wert wenn vorhanden, sonst Regel-Hint.
-        """
+        """Alle Events mit LLM-Bewertung, gefiltert nach effektiver Severity."""
         rows = self._conn.execute(
             """
             SELECT e.id, e.ts, e.detector, e.severity_hint, e.title,

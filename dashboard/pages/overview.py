@@ -134,22 +134,64 @@ def _update_timeline(_n):
                 annotations=[{"text": "keine Events in den letzten 24 h",
                               "showarrow": False,
                               "xref": "paper", "yref": "paper",
-                              "x": 0.5, "y": 0.5}],
+                              "x": 0.5, "y": 0.5,
+                              "font": {"color": "#888"}}],
             )
-        fig = px.bar(df, x="hour", y="count", color="detector",
-                     template="cyborg")
+
+        fig = px.bar(
+            df, x="hour", y="count", color="detector",
+            template="cyborg",
+            labels={"hour": "Stunde", "count": "Events",
+                    "detector": "Detektor"},
+        )
         fig.update_layout(
-            height=280, margin=dict(l=10, r=10, t=10, b=10),
-            legend=dict(orientation="h", y=-0.2),
-            xaxis_title="", yaxis_title="Events",
+            height=340,
+            margin=dict(l=60, r=30, t=30, b=90),
+            legend=dict(
+                orientation="h",
+                yanchor="top", y=-0.25,
+                xanchor="left",  x=0,
+                font=dict(color="#e0e0e0", size=11),
+                bgcolor="rgba(0,0,0,0)",
+            ),
+            bargap=0.35,
+            xaxis=dict(
+                tickformat="%d.%m. %H:%M",
+                tickangle=-30,
+                showgrid=False,
+                tickfont=dict(color="#e0e0e0", size=10),
+                dtick=3600000,
+            ),
+            yaxis=dict(
+                showgrid=True,
+                gridcolor="#2a2a2a",
+                zeroline=True,
+                zerolinecolor="#444",
+                rangemode="tozero",
+                tick0=0,
+                dtick=2,
+                tickfont=dict(color="#e0e0e0", size=10),
+                title=dict(text="Events",
+                           font=dict(color="#888", size=10)),
+            ),
+            # ← DAS ist der entscheidende Fix:
+            plot_bgcolor="#0d0d0d",
+            paper_bgcolor="#0d0d0d",
+            font=dict(color="#e0e0e0"),
+        )
+        fig.update_traces(
+            hovertemplate="<b>%{x|%d.%m. %H:%M}</b><br>"
+                          "%{y} Events<extra></extra>",
         )
         return fig
     except Exception as e:
-        # Zeigt die echte Fehlermeldung direkt im Chart
+        import traceback
+        tb = traceback.format_exc()
         return go.Figure().update_layout(
             template="cyborg", height=280,
             annotations=[{
-                "text": f"Fehler: {type(e).__name__}: {e}",
+                "text": f"Fehler: {type(e).__name__}: {e}<br>"
+                        f"<span style='font-size:10px'>{tb[-200:]}</span>",
                 "showarrow": False,
                 "xref": "paper", "yref": "paper",
                 "x": 0.5, "y": 0.5,
