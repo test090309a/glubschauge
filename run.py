@@ -1,12 +1,15 @@
-"""Phase 4b: glubschauge mit TUI, Detail-Panel und Wireshark-Sprung."""
+"""Phase 6: glubschauge mit Rotation, Härtung und Export."""
 import asyncio
 import logging
+import logging.handlers
+import sys
 from pathlib import Path
 
 from glubschauge.capture     import TSharkCapture
 from glubschauge.config      import load as load_config
 from glubschauge.detectors   import (
     DnsFailureDetector, NewHostDetector, SynFanOutDetector,
+    BeaconingDetector, HighVolumeFlowDetector,
 )
 from glubschauge.engine      import RuleEngine
 from glubschauge.events      import EventStore
@@ -15,27 +18,57 @@ from glubschauge.ringbuffer  import RingBuffer
 from glubschauge.tui         import GlubschaugeApp
 from glubschauge.worker      import LlmWorker
 
-logging.basicConfig(
-    level=logging.WARNING,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    filename="glubschauge.log",
-)
-log = logging.getLogger(__name__)
 
-DB_PATH = Path("glubschauge.db")
+# --- Pfade relativ zu run.py – funktioniert aus jedem CWD -------------
+BASE_DIR    = Path(__file__).resolve().parent
+CONFIG_PATH = BASE_DIR / "config.toml"
+DB_PATH     = BASE_DIR / "glubschauge.db"
+LOG_PATH    = BASE_DIR / "glubschauge.log"
+RING_DIR    = BASE_DIR / "ring"
+
+
+# --- Logging mit Rotation ---------------------------------------------
+def _setup_logging() -> logging.Logger:
+    handler = logging.handlers.RotatingFileHandler(
+        LOG_PATH, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8",
+    )
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    ))
+    root = logging.getLogger()
+    root.setLevel(logging.WARNING)
+    root.addHandler(handler)
+
+    # httpx/httpcore-Rauschen unterdrücken
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+    return logging.getLogger("glubschauge")
+
+
+log = _setup_logging()
+
+
+def _excepthook(exc_type, exc_value, exc_tb) -> None:
+    """Wird bei unbehandelten Exceptions aufgerufen – loggen statt stumm sterben."""
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+        return
+    log.critical("Unbehandelte Exception:", exc_info=(exc_type, exc_value, exc_tb))
+
+
+sys.excepthook = _excepthook
 
 
 def main() -> None:
-    cfg = load_config("config.toml")
+    cfg = load_config(CONFIG_PATH)
 
-    # --- Capture (Haupt-tshark, strukturierte Metadaten) -------------
     capture = TSharkCapture(
         cfg.capture.tshark_path,
         cfg.capture.interface,
         cfg.capture.bpf_filter,
     )
 
-    # --- Ringpuffer (zweiter tshark, rohe pcapng-Files) --------------
     ringbuffer = None
     if cfg.ring.enabled:
         ring_filter = cfg.ring.bpf_filter or cfg.capture.bpf_filter
@@ -43,15 +76,13 @@ def main() -> None:
             tshark_path=cfg.capture.tshark_path,
             interface=cfg.capture.interface,
             bpf_filter=ring_filter,
-            ring_dir=cfg.ring.ring_dir,
+            ring_dir=RING_DIR,
             file_interval_s=cfg.ring.file_interval_s,
             num_files=cfg.ring.num_files,
         )
 
-    # --- Persistenz ---------------------------------------------------
     store = EventStore(DB_PATH)
 
-    # --- Detektoren ---------------------------------------------------
     detectors = [
         NewHostDetector(
             store=store,
@@ -60,15 +91,25 @@ def main() -> None:
             warmup_seconds=cfg.detectors.new_host_warmup_seconds,
         ),
         DnsFailureDetector(),
-        SynFanOutDetector(),
+        SynFanOutDetector(
+            threshold=cfg.detectors.syn_fan_out_threshold,
+            window_s=cfg.detectors.syn_fan_out_window_s,
+        ),
+        BeaconingDetector(
+            min_samples=cfg.detectors.beaconing_min_samples,
+            max_jitter_cv=cfg.detectors.beaconing_max_jitter_cv,
+            window_minutes=cfg.detectors.beaconing_window_minutes,
+        ),
+        HighVolumeFlowDetector(
+            threshold_mb=cfg.detectors.volume_threshold_mb,
+            window_s=cfg.detectors.volume_window_s,
+        ),
     ]
 
-    # --- Queues -------------------------------------------------------
     llm_queue      = asyncio.Queue(maxsize=100)
     packet_queue   = asyncio.Queue(maxsize=500)
     ui_event_queue = asyncio.Queue(maxsize=200)
 
-    # --- Engine + LLM-Worker -----------------------------------------
     engine = RuleEngine(
         capture, detectors, store,
         event_queue=llm_queue,
@@ -82,14 +123,14 @@ def main() -> None:
         ui_event_queue=ui_event_queue,
     )
 
-    # --- TUI ----------------------------------------------------------
     app = GlubschaugeApp(
         engine=engine,
         worker=worker,
         capture=capture,
         ringbuffer=ringbuffer,
+        reports_dir=BASE_DIR / "reports",      # ← NEU: für Export
     )
-    app.run()   # Textual startet den Loop, on_mount() startet alle Tasks
+    app.run()
 
 
 if __name__ == "__main__":

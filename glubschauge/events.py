@@ -14,7 +14,7 @@ class Event:
     """Ein erkanntes Ereignis – Input für LLM-Bewertung und TUI."""
     detector: str
     timestamp: datetime
-    severity_hint: int          # 0–10, Regel-Schätzung (LLM darf später überschreiben)
+    severity_hint: int
     title: str
     src: str = ""
     dst: str = ""
@@ -54,6 +54,13 @@ CREATE TABLE IF NOT EXISTS hosts (
     PRIMARY KEY (mac, ip)
 );
 
+CREATE TABLE IF NOT EXISTS hosts_mac (
+    mac        TEXT PRIMARY KEY,
+    vendor     TEXT NOT NULL DEFAULT '',
+    first_seen TEXT NOT NULL,
+    last_seen  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS event_evaluations (
     event_id    INTEGER PRIMARY KEY,
     model       TEXT    NOT NULL,
@@ -62,8 +69,7 @@ CREATE TABLE IF NOT EXISTS event_evaluations (
     explanation TEXT    NOT NULL,
     raw_json    TEXT    NOT NULL DEFAULT '{}',
     duration_ms INTEGER NOT NULL DEFAULT 0,
-    ts          TEXT    NOT NULL,
-    FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+    ts          TEXT    NOT NULL
 );
 """
 
@@ -76,6 +82,8 @@ class EventStore:
         self._conn = sqlite3.connect(self.db_path)
         self._conn.executescript(SCHEMA)
         self._conn.commit()
+
+    # --- events --------------------------------------------------------
 
     def write(self, ev: Event) -> int:
         cur = self._conn.execute(
@@ -98,8 +106,7 @@ class EventStore:
         )
         return cur.fetchall()
 
-    def close(self) -> None:
-        self._conn.close()
+    # --- hosts (MAC/IP-Paare) ------------------------------------------
 
     def load_hosts(self) -> set[tuple[str, str]]:
         cur = self._conn.execute("SELECT mac, ip FROM hosts")
@@ -113,6 +120,53 @@ class EventStore:
             (mac, ip, iso, iso),
         )
         self._conn.commit()
+
+    # --- hosts_mac (MAC-Stammdaten + Vendor) ---------------------------
+
+    def has_mac(self, mac: str) -> bool:
+        cur = self._conn.execute("SELECT 1 FROM hosts_mac WHERE mac = ?", (mac,))
+        return cur.fetchone() is not None
+
+    def upsert_mac(self, mac: str, vendor: str, ts: datetime) -> None:
+        iso = ts.isoformat()
+        self._conn.execute(
+            "INSERT INTO hosts_mac (mac, vendor, first_seen, last_seen)"
+            " VALUES (?, ?, ?, ?)"
+            " ON CONFLICT(mac) DO UPDATE SET last_seen = excluded.last_seen",
+            (mac, vendor, iso, iso),
+        )
+        self._conn.commit()
+
+    def list_hosts(self) -> list[dict]:
+        """Liefert alle bekannten MACs mit aggregierten IPs und Event-Zähler."""
+        macs = self._conn.execute(
+            "SELECT mac, vendor, first_seen, last_seen FROM hosts_mac"
+            " ORDER BY last_seen DESC"
+        ).fetchall()
+
+        result: list[dict] = []
+        for mac, vendor, first_seen, last_seen in macs:
+            ip_rows = self._conn.execute(
+                "SELECT ip, last_seen FROM hosts WHERE mac = ?"
+                " ORDER BY (ip LIKE 'fe80:%') ASC, last_seen DESC",
+                (mac,),
+            ).fetchall()
+            ips = [r[0] for r in ip_rows]
+            event_count = self._conn.execute(
+                "SELECT COUNT(*) FROM events WHERE title LIKE ?",
+                (f"%({mac})%",),
+            ).fetchone()[0]
+            result.append({
+                "mac": mac,
+                "vendor": vendor,
+                "first_seen": first_seen,
+                "last_seen": last_seen,
+                "ips": ips,
+                "events": event_count,
+            })
+        return result
+
+    # --- LLM-Bewertungen -----------------------------------------------
 
     def write_evaluation(
         self,
@@ -156,3 +210,40 @@ class EventStore:
             "llm_explanation": row[10], "llm_model": row[11],
             "llm_duration_ms": row[12],
         }
+
+    def list_events_filtered(self, min_severity: int = 0, limit: int = 1000) -> list[dict]:
+        """Alle Events mit LLM-Bewertung, gefiltert nach effektiver Severity.
+
+        Effektive Severity = LLM-Wert wenn vorhanden, sonst Regel-Hint.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT e.id, e.ts, e.detector, e.severity_hint, e.title,
+                   e.src, e.dst, e.details_json,
+                   v.severity, v.category, v.explanation, v.model, v.duration_ms
+            FROM events e
+            LEFT JOIN event_evaluations v ON v.event_id = e.id
+            ORDER BY e.id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+        result: list[dict] = []
+        for row in rows:
+            llm_sev = row[8]
+            effective = llm_sev if llm_sev is not None else row[3]
+            if effective < min_severity:
+                continue
+            result.append({
+                "id": row[0], "ts": row[1], "detector": row[2],
+                "severity_hint": row[3], "title": row[4],
+                "src": row[5], "dst": row[6], "details": row[7],
+                "llm_severity": row[8], "llm_category": row[9],
+                "llm_explanation": row[10], "llm_model": row[11],
+                "llm_duration_ms": row[12],
+            })
+        return result
+
+    def close(self) -> None:
+        self._conn.close()

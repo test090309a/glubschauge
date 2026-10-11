@@ -8,9 +8,11 @@ import subprocess
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
+from .exporter import export_events_markdown
+from .oui import vendor_for
 
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal
+from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import DataTable, Footer, Header, Static
@@ -263,6 +265,38 @@ class EventFeed(DataTable):
         self._current_event_id = None
 
 
+class HostsTable(DataTable):
+    """Übersicht aller bekannten MAC-Geräte mit Vendor und IPs."""
+
+    def on_mount(self) -> None:
+        self.cursor_type = "row"
+        self.zebra_stripes = True
+        self.add_column("Vendor",   width=22)
+        self.add_column("MAC",      width=18)
+        self.add_column("IPs",      width=30)
+        self.add_column("Events",   width=7)
+        self.add_column("Zuletzt",  width=10)
+
+    def refresh_from(self, hosts: list[dict]) -> None:
+        # Cursor-Position merken
+        saved = self.cursor_row
+        self.clear()
+        for h in hosts:
+            ips = h["ips"]
+            ip_str = ips[0] if ips else "—"
+            if len(ips) > 1:
+                ip_str = f"{ip_str} (+{len(ips)-1})"
+            last = h["last_seen"][11:19] if h["last_seen"] else "—"
+            self.add_row(
+                h["vendor"] or "—",
+                h["mac"],
+                ip_str,
+                str(h["events"]),
+                last,
+            )
+        if saved is not None and self.row_count > saved:
+            self.move_cursor(row=saved)
+
 # ---------------------------------------------------------------------------
 # Detail-Panel
 # ---------------------------------------------------------------------------
@@ -318,7 +352,9 @@ class GlubschaugeApp(App):
         padding: 0 1;
     }
     #main { height: 1fr; }
-    #packets { width: 3fr; }
+    #left-panel { width: 3fr; }
+    #packets { height: 1fr; }
+    #hosts   { height: 1fr; display: none; }
     #events  { width: 2fr; }
     DataTable { height: 1fr; }
     #details {
@@ -328,6 +364,7 @@ class GlubschaugeApp(App):
         overflow-y: auto;
     }
     """
+
     TITLE     = "glubschauge"
     SUB_TITLE = "Netzwerk-Monitor mit lokaler KI"
 
@@ -340,21 +377,27 @@ class GlubschaugeApp(App):
         ("s",       "cycle_filter",      "Filter"),
         ("r",       "reanalyse",         "Re-Analyse"),
         ("R",       "reanalyse_deep",    "Tiefenanalyse"),
+        ("e",       "export_report",     "Export"),
+        ("h",       "toggle_hosts",      "Hosts/Pakete"),
     ]
 
-    def __init__(self, engine, worker, capture, ringbuffer=None) -> None:
+    def __init__(self, engine, worker, capture, ringbuffer=None,
+                 reports_dir=None) -> None:
         super().__init__()
-        self.engine     = engine
-        self.worker     = worker
-        self.capture    = capture
-        self.ringbuffer = ringbuffer
+        self.engine      = engine
+        self.worker      = worker
+        self.capture     = capture
+        self.ringbuffer  = ringbuffer
+        self.reports_dir = Path(reports_dir) if reports_dir else Path("reports")
         self._packet_times: deque[float] = deque(maxlen=200)
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield StatusBar()
         with Horizontal(id="main"):
-            yield PacketTable(id="packets")
+            with Vertical(id="left-panel"):
+                yield PacketTable(id="packets")
+                yield HostsTable(id="hosts")     # initial versteckt
             yield EventFeed(id="events")
         yield DetailPanel(id="details")
         yield Footer()
@@ -362,13 +405,41 @@ class GlubschaugeApp(App):
     # ---- Lifecycle ----------------------------------------------------
 
     def on_mount(self) -> None:
-        self.run_worker(self._engine_task(),  name="engine")
-        self.run_worker(self._worker_task(),  name="llm-worker")
-        self.run_worker(self._packet_pump(),  name="packet-pump")
-        self.run_worker(self._event_pump(),   name="event-pump")
-        self.run_worker(self._stats_ticker(), name="stats-ticker")
+        self.run_worker(self._engine_task(),   name="engine")
+        self.run_worker(self._worker_task(),   name="llm-worker")
+        self.run_worker(self._packet_pump(),   name="packet-pump")
+        self.run_worker(self._event_pump(),    name="event-pump")
+        self.run_worker(self._stats_ticker(),  name="stats-ticker")
+        self.run_worker(self._hosts_pump(),    name="hosts-pump")   # ← neu
         if self.ringbuffer is not None:
             self.ringbuffer.start()
+
+    async def _hosts_pump(self) -> None:
+        """Aktualisiert die Hosts-Tabelle alle 3 Sekunden."""
+        table = self.query_one("#hosts", HostsTable)
+        while True:
+            await asyncio.sleep(3.0)
+            try:
+                hosts = self.engine.store.list_hosts()
+                table.refresh_from(hosts)
+            except Exception:
+                log.exception("Hosts-Refresh fehlgeschlagen")
+
+    def action_toggle_hosts(self) -> None:
+        packets = self.query_one("#packets", PacketTable)
+        hosts   = self.query_one("#hosts",   HostsTable)
+        if packets.display:
+            packets.display = False
+            hosts.display   = True
+            # Sofort einmal befüllen
+            hosts.refresh_from(self.engine.store.list_hosts())
+            hosts.focus()
+            self.notify("Ansicht: Hosts", timeout=1)
+        else:
+            hosts.display   = False
+            packets.display = True
+            packets.focus()
+            self.notify("Ansicht: Pakete", timeout=1)
 
     async def on_unmount(self) -> None:
         self.capture.stop()
@@ -463,6 +534,31 @@ class GlubschaugeApp(App):
     def action_reanalyse_deep(self) -> None:
         self._trigger_reanalyse(stage="forensic")
 
+    def action_export_report(self) -> None:
+        feed = self.query_one("#events", EventFeed)
+        min_sev = feed.min_sev
+        events = self.engine.store.list_events_filtered(min_severity=min_sev)
+        if not events:
+            self.notify(
+                f"Keine Events mit Severity ≥ {min_sev} zum Exportieren",
+                severity="warning",
+            )
+            return
+        try:
+            path = export_events_markdown(
+                events,
+                out_dir=self.reports_dir,
+                min_severity=min_sev,
+            )
+        except Exception as e:
+            log.exception("Export fehlgeschlagen")
+            self.notify(f"Export-Fehler: {e}", severity="error", timeout=5)
+            return
+        self.notify(
+            f"Export: {path.name}  ({len(events)} Events)",
+            timeout=4,
+        )
+        
     # ---- Wireshark ----------------------------------------------------
 
     def _open_wireshark_for(self, ev) -> None:

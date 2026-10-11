@@ -12,20 +12,31 @@ local_subnets = [
   "224.0.0.0/4",        # IPv4 Multicast lokal (mDNS, SSDP)
 ]
 
-# Bekannte Geräte: werden nie als "neu" gemeldet, tauchen aber im Event-Log
-# als "erstmals gesehen" auf, wenn sie plötzlich mit anderer IP erscheinen.
+# Bekannte Geräte: werden nie als "neu" gemeldet.
 trusted_hosts = [
   "00:cb:7a:50:16:c4",  # Router (Vantiva)
-  "34:5a:60:12:61:4c",  # dein Windows-PC (Micro-Star)
-  "d8:3a:dd:e2:32:11",  # Raspberry Pi
+  "34:5a:60:12:61:4c",  # Windows-PC (Micro-Star)
+  # "d8:3a:dd:e2:32:11",  # Raspberry Pi (Kodi ventosus)
+  # "b8:27:eb:92:e8:10",  # Raspberry Pi (Kodi inertia)
+  "70:85:c2:a0:c1:dd",  # ASRock-PC
+  "02:10:18:50:16:c1",  # Router Link-Local
 ]
 
 [detectors]
-new_host_warmup_seconds = 0
+# new_host_warmup_seconds  = 60
+new_host_warmup_seconds  = 0
+# syn_fan_out_threshold    = 25
+syn_fan_out_threshold    = 5
+syn_fan_out_window_s     = 10
+beaconing_min_samples    = 8
+beaconing_max_jitter_cv  = 0.10
+beaconing_window_minutes = 60
+volume_threshold_mb      = 250.0
+volume_window_s          = 60
 
 [ring]
 enabled         = true
 ring_dir        = "ring"
-file_interval_s = 10       # jede Datei deckt 10 s ab
-num_files       = 12       # 12 × 10 s = 2 Minuten Historie
-bpf_filter      = ""       # leer → verwendet denselben Filter wie [capture]
+file_interval_s = 10
+num_files       = 12
+bpf_filter      = ""
