@@ -1,0 +1,4 @@
+2026-10-11 04:40:39,351 [WARNING] glubschauge.engine: EVENT #1 [new_host sev=3] Neues Gerät: Raspberry Pi Foundation (b8:27:eb:92:e8:10) — 192.168.0.122
+2026-10-11 04:40:47,707 [WARNING] glubschauge.engine: EVENT #2 [new_host sev=3] Neues Gerät: Lokale MAC (randomisiert) (22:37:10:8d:f6:48) — 192.168.0.2
+2026-10-11 04:41:31,349 [WARNING] glubschauge.engine: EVENT #3 [new_host sev=3] Neues Gerät: Raspberry Pi Trading (d8:3a:dd:e2:32:11) — 192.168.0.245
+2026-10-11 04:41:42,239 [WARNING] glubschauge.engine: EVENT #4 [syn_fan_out sev=3] SYN-Fächer: 192.168.0.194 → 20.42.65.89 (5 SYNs, 1 Ports/10s)

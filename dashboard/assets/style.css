@@ -1,0 +1,66 @@
+/* Dark-Theme-Feinschliff */
+body {
+    background-color: #0a0a0a;
+    color: #e0e0e0;
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.card {
+    border-radius: 8px;
+}
+
+.card-header {
+    background-color: #161616;
+    border-bottom: 1px solid #2a2a2a;
+    font-weight: 600;
+    font-size: 0.9rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #a0a0a0;
+}
+
+.card-body {
+    padding: 1rem;
+}
+
+table.table-dark {
+    --bs-table-bg: #0f0f0f;
+    --bs-table-color: #e0e0e0;
+    --bs-table-striped-bg: #141414;
+    --bs-table-hover-bg: #1c1c1c;
+    --bs-table-border-color: #222;
+}
+
+table.table thead th {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #888;
+    border-bottom: 1px solid #2a2a2a;
+}
+
+.navbar-brand {
+    font-weight: 700;
+    letter-spacing: 0.03em;
+}
+
+.badge {
+    font-family: monospace;
+    font-weight: 600;
+}
+
+h2 {
+    font-weight: 700;
+    letter-spacing: -0.01em;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: #0a0a0a; }
+::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #555; }
+
+/* Graph-Hintergrund angleichen */
+.js-plotly-plot .plotly .main-svg {
+    background-color: transparent !important;
+}

@@ -1,0 +1,238 @@
+📋 Folgeprompt für einen Agenten – glubschauge
+
+Du übernimmst die Weiterentwicklung eines Python-Projekts namens glubschauge – ein TUI-basierter Netzwerk-Monitor mit lokaler KI. Hier ist der komplette Zustand.
+1. Projektziel
+
+Ein dauerhaft laufendes Monitoring-Tool für ein Heimnetzwerk auf Windows 11, das:
+
+    Netzwerkverkehr live via tshark mitschneidet
+
+    Regelbasierte Detektoren auf die Pakete anwendet
+
+    Erkannte Events an ein lokales LLM (Ollama) zur Bewertung übergibt
+
+    Die Ergebnisse in einer Textual-TUI anzeigt
+
+    Eine Dash-Weboberfläche als grafisches Dashboard bereitstellt
+
+    Optional: Wireshark-Sprung bei Events (Ringpuffer), Markdown-Export
+
+Motivation des Nutzers: Privatsphäre – kein Cloud-LLM, alles lokal. Perspektivisch möchte der Nutzer "professionelle" Netzwerküberwachung im Heimnetz.
+2. Hardware/Umgebung
+Komponente	Wert
+OS	Windows 11 Build 26300
+GPU	NVIDIA RTX 3060, 12 GB VRAM
+RAM	64 GB
+Python	3.12.10
+tshark	Wireshark 4.6.9, Pfad M:\Wireshark\tshark.exe
+Interface	Index 8 ("Ethernet", Realtek 2.5GbE)
+Ollama	Port 11434, Modelle: llama3.2:3b, llama3.1:8b, qwen2.5-coder:14b, qwen2.5-coder:1.5b-base, weitere
+Projekt-Pfad	M:\projekte_2026\glubschauge
+Git	Repo initialisiert, noch nichts committet
+3. Verzeichnisstruktur (aktuell)
+text
+
+M:\projekte_2026\glubschauge\
+├── .git\
+├── .venv\                          (falls angelegt)
+├── glubschauge\                    ← Python-Package
+│   ├── __init__.py
+│   ├── broker.py                   Prompt-Bau + Model-Router
+│   ├── capture.py                  TSharkCapture (asynchron)
+│   ├── config.py                   TOML-Loader
+│   ├── detectors.py                5 Detektoren
+│   ├── engine.py                   RuleEngine (Capture → Detektoren)
+│   ├── events.py                   Event + EventStore (SQLite)
+│   ├── exporter.py                 Markdown-Report-Export
+│   ├── llm.py                      Ollama-Client (async)
+│   ├── models.py                   Packet-Dataclass
+│   ├── oui.py                      MAC-Vendor-Lookup
+│   ├── ringbuffer.py               Zweiter tshark für pcapng-Ringpuffer
+│   ├── tui.py                      Textual-TUI
+│   └── worker.py                   LLM-Worker
+├── dashboard\                      ← Dash-Weboberfläche
+│   ├── app.py                      Dash-App (use_pages=True, Port 8050)
+│   ├── data.py                     Datenzugriffsschicht (SQLite → pandas)
+│   ├── assets\style.css
+│   ├── components\
+│   │   ├── __init__.py
+│   │   ├── event_feed.py
+│   │   ├── header.py
+│   │   ├── host_inventory.py
+│   │   └── kpi_cards.py
+│   └── pages\
+│       ├── __init__.py
+│       ├── events.py
+│       ├── hosts.py
+│       ├── overview.py
+│       └── reports.py
+├── ring\                           tshark-Ringpuffer (rotierende pcapng)
+├── reports\                        Markdown-Reports aus der TUI
+├── config.toml
+├── glubschauge.db                  SQLite-Datenbank
+├── glubschauge.log                 rotierendes Log (5 MB × 3)
+├── inspect_events.py               Kleines CLI-Tool
+├── run.py                          Einstieg TUI
+├── START.bat                       Startscript (TUI + Dashboard)
+└── STOP.bat                        Stopscript
+
+4. Datenbank-Schema (glubschauge.db)
+
+Wichtig: Foreign Keys wurden entfernt, weil sie das executescript zerbrachen.
+sql
+
+CREATE TABLE events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    detector TEXT NOT NULL,
+    severity_hint INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    src TEXT DEFAULT '',
+    dst TEXT DEFAULT '',
+    details_json TEXT DEFAULT '{}'
+);
+
+CREATE TABLE hosts (              -- (MAC, IP)-Paare
+    mac TEXT NOT NULL,
+    ip TEXT NOT NULL,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    PRIMARY KEY (mac, ip)
+);
+
+CREATE TABLE hosts_mac (          -- MAC-Stammdaten
+    mac TEXT PRIMARY KEY,
+    vendor TEXT DEFAULT '',
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL
+);
+
+CREATE TABLE event_evaluations (
+    event_id INTEGER PRIMARY KEY,
+    model TEXT NOT NULL,
+    severity INTEGER NOT NULL,
+    category TEXT NOT NULL,
+    explanation TEXT NOT NULL,
+    raw_json TEXT DEFAULT '{}',
+    duration_ms INTEGER DEFAULT 0,
+    ts TEXT NOT NULL
+);
+
+5. Was funktioniert (verifiziert)
+Feature	Status
+tshark-Capture via -T ek + Streaming-Parser	✅
+new_host-Detektor (MAC-basiert, OUI-Vendor)	✅
+dns_failure_burst-Detektor	✅ (seit DNS-Fix ruhig)
+syn_fan_out-Detektor	✅ (verifiziert mit Event)
+beaconing-Detektor	✅ implementiert, noch nicht real gefeuert
+high_volume-Detektor	✅ implementiert, noch nicht real gefeuert
+LLM-Bewertung via Ollama (3B Filter, 8B Analyze, 14B Forensic)	✅
+Textual-TUI mit Filter, Detail-Panel, Wireshark-Sprung, Re-Analyse, Export	✅
+SQLite-Persistenz inkl. hosts_mac	✅
+MAC-Vendor-Lookup	✅ (Apple, Raspberry Pi, Vantiva, Micro-Star, ASRock, ...)
+Hosts-Tabelle (h-Taste)	✅
+Markdown-Export (e-Taste)	✅
+Log-Rotation	✅
+Absoluter Pfad-Aufruf (von überall)	✅
+Ringpuffer + Wireshark-Sprung (w)	✅ (Snapshot verifiziert mit Paketen)
+Dash-Dashboard mit 4 Seiten	✅ (Timeline-Chart hatte Bug)
+6. Bekannte offene Bugs / Punkte
+
+    dashboard/pages/overview.py → _update_timeline: Der Fix für pandas 3.0 (Zeitzonen) wurde vorgeschlagen, aber nicht verifiziert. Die aktuelle get_event_timeline() in data.py muss robust gegen tz-aware datetime sein:
+    python
+
+    df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
+    df = df.dropna(subset=["ts"]).copy()
+    df["hour"] = df["ts"].dt.tz_convert("UTC").dt.tz_localize(None).dt.floor("h")
+
+    Außerdem: Der Callback sollte try/except enthalten und Fehler direkt im Chart-annotation-Text anzeigen.
+
+    START.bat: Klammer-Bug behoben ((Tray-Icon) in echo innerhalb if-Blocks). Korrigierte Version siehe unten. Nicht verifiziert.
+
+    hosts_mac-Event-Zähler in EventStore.list_hosts() nutzt WHERE title LIKE '%' || mac || '%' – funktioniert, ist aber unschön.
+
+    Dashboard-Startseite – der Timeline-Chart zeigt möglicherweise noch nichts (siehe Punkt 1).
+
+    Escape-Falle: Textual Help-Overlay (Command Palette) blockiert manchmal. Nutzer muss Escape drücken.
+
+7. Detektor-Konfiguration (Dauerbetrieb)
+
+In config.toml:
+toml
+
+[detectors]
+new_host_warmup_seconds  = 60
+syn_fan_out_threshold    = 25
+syn_fan_out_window_s     = 10
+beaconing_min_samples    = 8
+beaconing_max_jitter_cv  = 0.10
+beaconing_window_minutes = 60
+volume_threshold_mb      = 250.0
+volume_window_s          = 60
+
+Realitäts-Check: Bei dieser Konfiguration feuern die Detektoren selten (Absicht). Zum Testen kurzzeitig auf syn_fan_out_threshold = 5, volume_threshold_mb = 1.0, new_host_warmup_seconds = 0 senken und eine MAC aus trusted_hosts entfernen.
+
+trusted_hosts enthält aktuell:
+toml
+
+trusted_hosts = [
+  "00:cb:7a:50:16:c4",  # Router Vantiva
+  "34:5a:60:12:61:4c",  # Windows-PC
+  "d8:3a:dd:e2:32:11",  # Pi ventosus
+  "b8:27:eb:92:e8:10",  # Pi inertia
+  "70:85:c2:a0:c1:dd",  # ASRock-PC
+  "02:10:18:50:16:c1",  # Router Link-Local
+]
+
+Bekannte Geräte im Netzwerk:
+
+    Router 192.168.0.1 (Vantiva)
+
+    Windows-PC 192.168.0.194 (Micro-Star, 2.5GbE)
+
+    Raspberry Pi 192.168.0.122 (Kodi inertia)
+
+    Raspberry Pi 192.168.0.245 (Kodi ventosus, LibreELEC)
+
+    iPhone 192.168.0.2 (MAC 22:37:10:8d:f6:48, randomisiert)
+
+    iPhone 192.168.0.147 (MAC 84:78:8b:80:39:53, Apple OUI)
+
+    Redmi Note 14 192.168.0.214 (MAC c2:20:7b:c0:f6:fd, randomisiert)
+
+    ASRock-PC 192.168.0.234
+
+8. Kritische Lessons Learned (Fallstricke)
+
+Diese Fehler sind bereits aufgetreten – ein neuer Agent sollte sie kennen:
+8.1 tshark-spezifisch
+
+    -T ek liefert 2 Zeilen pro Paket: Erst Index-Header, dann Paket-JSON. Der Parser muss Index-Header ignorieren (if "index" in obj).
+
+    TCP-Flags: tshark 4.6 liefert boolesche Felder (tcp_tcp_flags_syn, tcp_tcp_flags_reset, tcp_tcp_flags_push – nicht _rst/_psh). Der Parser muss diese zuerst probieren, dann erst tcp_tcp_flags_str (das ist bei tshark 4.6 ASCII-Art wie ·······A···· und nutzlos).
+
+    -l ist Pflicht für Live-Ausgabe, sonst puffert tshark minutenlang.
+
+    Interface per Index statt Name ansprechen (-i 8), weil Namen Sonderzeichen enthalten können.
+
+8.2 Python/asyncio
+
+    asyncio.create_task() in einer async def die via run_until_complete aufgerufen wird: Tasks werden gecancelt, wenn der Loop endet. Lösung: Alle Tasks im on_mount() der Textual-App starten.
+
+    Textual run_worker(..., exclusive=True) killt alle anderen Worker derselben Gruppe – nicht ohne group= verwenden.
+
+    self.run_worker(self._foo(), ...) muss aufgerufen werden (Klammern), nicht als Methodenreferenz übergeben.
+
+8.3 Textual
+
+    add_columns("a", "b") + self.columns["a"].width funktioniert nicht in allen Versionen. Stattdessen add_column("a", width=…).
+
+    cursor_row liefert Index, nicht RowKey. Aktuellen Event per on_data_table_row_highlighted tracken.
+
+    update_cell(row_key, column_key, ...) braucht die echte ColumnKey (Rückgabe von add_column).
+
+8.4 SQLite
+
+    Schema-Updates: Beim Einfügen neuer CREATE TABLE-Statements in SCHEMA kann ein Fehler mittendrin den Rest verschlucken (deshalb fehlte hosts). Nach Schema-Änderungen immer glubschauge.db löschen.
+
+    Foreign Keys wurden entfernt – waren die Ursache.

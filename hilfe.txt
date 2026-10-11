@@ -1,0 +1,9 @@
+---jn 04:10 11.10.2026
+GLUBSCHAUGE
+
+START:
+1. Den Netzwerkchecker:
+M:\projekte_2026\glubschauge> python run.py
+
+2. Das Dashboard:
+M:\projekte_2026\glubschauge\dashboard> python app.py
