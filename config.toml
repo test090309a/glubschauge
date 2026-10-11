@@ -1,0 +1,31 @@
+[capture]
+tshark_path = "M:\\Wireshark\\tshark.exe"
+interface   = "8"
+bpf_filter  = "not port 22 and not port 21027"
+
+[network]
+# Alles außerhalb dieser Subnetze ist Transit-Verkehr und wird ignoriert.
+local_subnets = [
+  "192.168.0.0/24",
+  "fe80::/10",          # Link-Local (Router-Announcements, NDP)
+  "ff02::/16",          # IPv6 Multicast lokal
+  "224.0.0.0/4",        # IPv4 Multicast lokal (mDNS, SSDP)
+]
+
+# Bekannte Geräte: werden nie als "neu" gemeldet, tauchen aber im Event-Log
+# als "erstmals gesehen" auf, wenn sie plötzlich mit anderer IP erscheinen.
+trusted_hosts = [
+  "00:cb:7a:50:16:c4",  # Router (Vantiva)
+  "34:5a:60:12:61:4c",  # dein Windows-PC (Micro-Star)
+  "d8:3a:dd:e2:32:11",  # Raspberry Pi
+]
+
+[detectors]
+new_host_warmup_seconds = 0
+
+[ring]
+enabled         = true
+ring_dir        = "ring"
+file_interval_s = 10       # jede Datei deckt 10 s ab
+num_files       = 12       # 12 × 10 s = 2 Minuten Historie
+bpf_filter      = ""       # leer → verwendet denselben Filter wie [capture]
