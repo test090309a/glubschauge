@@ -153,11 +153,8 @@ Taste	Aktion	Beschreibung
 d	Details	Zeigt vollständige Details und LLM-Erklärung zum markierten Event
 
 Esc	Schließen	Schließt das Detail-Panel
-
 w	Wireshark	Öffnet den pcap-Snapshot des Events direkt in Wireshark
-
 h	Hosts / Pakete	Schaltet das linke Panel zwischen Live-Paketen und Host-Inventar um
-
 s	Filter	Schaltet den minimalen Severity-Filter zyklisch durch (0, 2, 3, 5, 7, 8)
 
 r	Re-Analyse	Wiederholt die LLM-Bewertung mit Standardmodell (llama3.1:8b)
