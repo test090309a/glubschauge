@@ -33,33 +33,54 @@ Das System bietet sowohl eine blitzschnelle **Terminal-Benutzeroberfläche (TUI)
 
 ## 🏗️ Architektur
 
-code Code
+```mermaid
+flowchart TD
+    %% Styling
+    classDef net fill:#1f2937,stroke:#3b82f6,stroke-width:2px,color:#fff;
+    classDef capture fill:#111827,stroke:#10b981,stroke-width:2px,color:#fff;
+    classDef core fill:#1e1e2e,stroke:#8b5cf6,stroke-width:2px,color:#fff;
+    classDef storage fill:#18181b,stroke:#f59e0b,stroke-width:2px,color:#fff;
+    classDef ai fill:#27272a,stroke:#ec4899,stroke-width:2px,color:#fff;
+    classDef ui fill:#0f172a,stroke:#06b6d4,stroke-width:2px,color:#fff;
 
-[ Netzwerk-Interface ]
-                         │
-                         ▼
-                ┌─────────────────┐
-                │  tshark (ek)    │
-                └────────┬────────┘
-                         ▼
-                ┌─────────────────┐
-                │   RuleEngine    │◄─── [ Detectors ]
-                └────────┬────────┘
-    ┌────────────────────┼────────────────────┐
-    ▼                    ▼                    ▼
+    %% Ingestion
+    NIC["🌐 Netzwerk-Interface (Npcap / Live LAN)"]:::net
+    NIC -->|"Promiscuous Stream"| Cap["tshark Subprozess (-T ek JSON)"]:::capture
+    NIC -.->|"Rolling Captures"| Ring["RingBuffer (pcapng Dateien)"]:::capture
 
-┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-│ EventStore │ │ LLM-Worker │ │ RingBuffer │
-│ (SQLite) │ │ (Ollama) │ │ (pcapng) │
-└───────┬──────┘ └───────┬──────┘ └──────┬───────┘
-│ │ │
-├────────────────────┴───────────────────┤
-▼ ▼
-┌──────────────────┐ ┌──────────────────┐
-│ Terminal-TUI │ │ Web-Dashboard │
-│ (Textual) │ │ (Dash / Plotly) │
-└──────────────────┘ └──────────────────┘
-code Code
+    %% Processing
+    Cap -->|"Paket-Stream (AsyncIterator)"| Engine["RuleEngine (Event-Router)"]:::core
+    
+    subgraph Detectors ["⚡ Regelbasierte Vorfilterung"]
+        Engine --> D1["NewHost & Online-Tracker"]:::core
+        Engine --> D2["Service & Port Discovery"]:::core
+        Engine --> D3["SYN-FanOut (Scans)"]:::core
+        Engine --> D4["C2 Beaconing Detector"]:::core
+        Engine --> D5["DNS Burst & High-Volume"]:::core
+        Engine --> D6["ARP Spoofing Monitor"]:::core
+    end
+
+    %% Storage & Queue
+    D1 & D2 & D3 & D4 & D5 & D6 -->|"Treffer"| DB[("SQLite Database\n(events, hosts, ports)")]:::storage
+    Engine -->|"Anomalie-Event"| Q1["asyncio.Queue (LLM)"]:::core
+    Engine -->|"Live-Pakete"| Q2["asyncio.Queue (UI)"]:::core
+
+    %% AI Pipeline
+    subgraph AIPipeline ["🧠 Lokale KI-Pipeline (Ollama)"]
+        Q1 --> Worker["LLM-Worker"]:::ai
+        Worker -->|"1. Klassifizierung & Flags"| Tev1["tev1:4b (/v1/systemone)"]:::ai
+        Worker -->|"2. Deutsche Erklärung"| Llama["llama3.2:3b (/api/generate)"]:::ai
+        Worker -->|"Evaluierung schreiben"| DB
+    end
+
+    %% UIs
+    subgraph UI ["🖥️ Benutzeroberflächen"]
+        Q2 & DB -.-> TUI["Terminal-TUI (Textual)\n• Live-Pakete & Events\n• Hotkeys & Wireshark-Snapshot"]:::ui
+        DB -.-> Dash["Web-Dashboard (Dash / Cytoscape)\n• Netzwerktopologie & Inventar\n• Klick-Drawer: offene Ports & Dienste\n• Severity-Filter & Zeitverlauf"]:::ui
+    end
+
+    Ring -.->|"On-Demand Snapshot (w)"| Wireshark["Wireshark GUI"]:::capture
+```
 
 ---
 
