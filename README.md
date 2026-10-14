@@ -158,32 +158,54 @@ R	Tiefenanalyse	Führt forensische Re-Analyse durch (qwen2.5-coder:14b)
 e	Export	Schreibt gefilterte Events als Markdown-Report in /reports
 c	Leeren	Leert die Tabellenansicht (Datenbank bleibt erhalten)
 q	Beenden	Beendet glubschauge und stoppt Hintergrund-Captures
-📁 Projektstruktur
-code Text
 
-glubschauge/
-├── config.toml             # Konfigurationsdatei
-├── run.py                  # Haupteinstiegspunkt (TUI)
-├── glubschauge/            # Kern-Paket
-│   ├── broker.py           # LLM-Prompting, Decision-Logik & Severity-Regeln
-│   ├── capture.py          # tshark-Subprozess & Packet-Parsing
-│   ├── config.py           # Typed Config Loader
-│   ├── detectors.py        # Regelbasierte Detektoren & passive Porterkennung
-│   ├── engine.py           # RuleEngine & Event-Routing
-│   ├── events.py           # SQLite-EventStore (Hosts, Ports, Events)
-│   ├── exporter.py         # Markdown-Report-Generator
-│   ├── llm.py              # Async Ollama-Client (/v1/systemone & /api/generate)
-│   ├── models.py           # Datenmodelle (Packet, Event)
-│   ├── oui.py              # MAC-OUI Vendor-Erkennung
-│   ├── ringbuffer.py       # Pcap-Ringpuffer & Snapshot-Extraktion
-│   ├── tui.py              # Textual-TUI-Oberfläche
-│   └── worker.py           # Async Worker für LLM-Verarbeitung
-├── dashboard/              # Dash-Web-Dashboard
-│   ├── app.py              # Dash-Einstiegspunkt
-│   ├── data.py             # Datenbank-Abfragen & Topologie-Berechnung
-│   ├── components/         # Tabellen, Cards & UI-Elemente
-│   └── pages/              # Overview, Hosts, Events, Reports
-└── reports/                # Generierte Markdown-Reports
+## 📁 Projektstruktur
+
+```mermaid
+graph TD
+    classDef root fill:#312e81,stroke:#6366f1,stroke-width:2px,color:#fff;
+    classDef dir fill:#1e293b,stroke:#0ea5e9,stroke-width:2px,color:#fff;
+    classDef file fill:#18181b,stroke:#64748b,stroke-width:1px,color:#e2e8f0;
+
+    Root["📂 glubschauge/"]:::root
+
+    %% Root files
+    Root --> Cfg["📄 config.toml (Zentrale Einstellungen)"]:::file
+    Root --> Run["▶️ run.py (Einstiegspunkt TUI)"]:::file
+
+    %% Glubschauge Core
+    Root --> CoreDir["📂 glubschauge/ (Kern-Engine)"]:::dir
+    CoreDir --> C_Cap["capture.py (tshark Subprozess)"]:::file
+    CoreDir --> C_Eng["engine.py (RuleEngine & Queues)"]:::file
+    CoreDir --> C_Det["detectors.py (7 Detektoren & Porterkennung)"]:::file
+    CoreDir --> C_Evt["events.py (SQLite EventStore)"]:::file
+    CoreDir --> C_Wrk["worker.py (Async LLM-Worker)"]:::file
+    CoreDir --> C_Bro["broker.py (Prompts & Entscheidungslogik)"]:::file
+    CoreDir --> C_Llm["llm.py (Ollama Client)"]:::file
+    CoreDir --> C_Rng["ringbuffer.py (Pcap-Rotator)"]:::file
+    CoreDir --> C_Tui["tui.py (Textual Benutzeroberfläche)"]:::file
+    CoreDir --> C_Oui["oui.py (MAC-Vendor-Lookup)"]:::file
+
+    %% Dashboard
+    Root --> DashDir["📂 dashboard/ (Web-Oberfläche)"]:::dir
+    DashDir --> D_App["app.py (Plotly Dash Server)"]:::file
+    DashDir --> D_Dat["data.py (SQL-Abfragen & Topologie-Graph)"]:::file
+    
+    DashDir --> PagesDir["📂 pages/ (Webseiten)"]:::dir
+    PagesDir --> P_Ovw["overview.py (KPIs & Zeitverlauf)"]:::file
+    PagesDir --> P_Hst["hosts.py (Topologie & Port-Drawer)"]:::file
+    PagesDir --> P_Evt["events.py (Filter & Volltextsuche)"]:::file
+    PagesDir --> P_Rep["reports.py (Export-Viewer)"]:::file
+
+    DashDir --> CompDir["📂 components/ (UI-Elemente)"]:::dir
+    CompDir --> CP_Inv["host_inventory.py (Inventar-Tabelle)"]:::file
+    CompDir --> CP_Evt["event_feed.py (Live-Tabelle)"]:::file
+    CompDir --> CP_Kpi["kpi_cards.py (Status-Karten)"]:::file
+
+    %% Reports & Tests
+    Root --> RepDir["📂 reports/ (Markdown Exporte)"]:::dir
+    Root --> RingDir["📂 ring/ (Pcapng Ringbuffer-Dateien)"]:::dir
+```
 
 🔒 Datenschutz & Sicherheit
 
