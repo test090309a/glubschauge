@@ -216,7 +216,73 @@ class NewHostDetector(Detector):
 
 
 # ---------------------------------------------------------------------------
-# Detektor 2: DNS-Fehlerquote
+# Detektor 2a: offene Dienste / Serverantworten
+# ---------------------------------------------------------------------------
+
+WELL_KNOWN_SERVICES: dict[int, str] = {
+    21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP", 53: "DNS",
+    67: "DHCP Server", 68: "DHCP Client", 80: "HTTP (Web)", 123: "NTP",
+    137: "NetBIOS", 139: "NetBIOS", 443: "HTTPS (Web/TLS)", 445: "SMB / Windows Share",
+    548: "AFP (Apple)", 631: "IPP (Drucker)", 1900: "SSDP / UPnP",
+    3000: "Grafana / Dev-Web", 3389: "RDP (Remote Desktop)",
+    5000: "Synology / UPnP", 5353: "mDNS / Bonjour", 8006: "Proxmox VE",
+    8080: "HTTP-Proxy / Alt", 8123: "Home Assistant", 8443: "HTTPS-Alt",
+    9000: "Portainer", 9090: "Prometheus / Cockpit", 9100: "Node Exporter"
+}
+
+class ServiceDiscoveryDetector(Detector):
+    """Erkennt passiv offene Ports und lauschende Dienste anhand von Server-Antworten."""
+    name = "service_discovery"
+
+    def __init__(self, store: EventStore, local_subnets: list[str]) -> None:
+        self.store = store
+        self.subnets = [ipaddress.ip_network(s) for s in local_subnets]
+        self._seen_cache: set[tuple[str, int, str]] = set()
+
+    def _is_local(self, ip_str: str) -> bool:
+        try:
+            ip = ipaddress.ip_address(ip_str)
+            return not (ip.is_loopback or ip.is_multicast) and any(ip in net for net in self.subnets)
+        except ValueError:
+            return False
+
+    def feed(self, pkt: Packet):
+        # Nur Pakete betrachten, die von einem lokalen Host gesendet werden
+        if not pkt.src or not self._is_local(pkt.src) or pkt.src_port is None:
+            return
+
+        eth = pkt.raw.get("eth") or {}
+        src_mac = (eth.get("eth_eth_src") or "").lower()
+        if not src_mac or src_mac == "ff:ff:ff:ff:ff:ff":
+            return
+
+        port = pkt.src_port
+        proto = "tcp" if _has_tcp(pkt) else ("udp" if "udp" in pkt.protocols or "udp" in pkt.raw else None)
+        if not proto:
+            return
+
+        is_open_service = False
+        if proto == "tcp":
+            flags = _tcp_flags(pkt)
+            # SYN+ACK = Server hat eine Verbindung auf diesem Port akzeptiert!
+            if "syn" in flags and "ack" in flags:
+                is_open_service = True
+        elif proto == "udp":
+            # Bekannter UDP-Serviceport, von dem aus gesendet wird
+            if port in (53, 67, 123, 1900, 5353):
+                is_open_service = True
+
+        if is_open_service:
+            service_name = WELL_KNOWN_SERVICES.get(port, pkt.protocol.upper() if pkt.protocol not in ("tcp", "udp") else "")
+            cache_key = (src_mac, port, proto)
+            if cache_key not in self._seen_cache:
+                self._seen_cache.add(cache_key)
+                self.store.upsert_port(src_mac, pkt.src, port, proto, service_name, pkt.timestamp)
+                log.info("Offener Dienst erkannt: %s (%s) Port %d/%s [%s]", pkt.src, src_mac, port, proto, service_name)
+
+
+# ---------------------------------------------------------------------------
+# Detektor 2b: DNS-Fehlerquote
 # ---------------------------------------------------------------------------
 
 class DnsFailureDetector(Detector):

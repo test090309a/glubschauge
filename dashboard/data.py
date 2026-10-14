@@ -306,3 +306,57 @@ def get_topology_elements() -> list[dict]:
             "classes": f"link {status}",
         })
     return elements
+
+# --------------------------------
+#  Host-Details (Ports, Events)
+# --------------------------------
+
+def get_host_details(mac: str) -> dict | None:
+    """Holt alle Details, offene Ports und Events für einen spezifischen Rechner."""
+    conn = get_connection()
+    if not mac:
+        return None
+
+    # 1. Basis-Hostdaten
+    row = conn.execute(
+        """SELECT h.mac, h.vendor, h.first_seen, h.last_seen,
+                  (SELECT GROUP_CONCAT(ip, ', ') FROM hosts WHERE hosts.mac = h.mac) AS ips
+           FROM hosts_mac h
+           WHERE h.mac = ?""",
+        (mac,),
+    ).fetchone()
+
+    if not row:
+        return None
+
+    status, color = host_status(row["last_seen"])
+
+    # 2. Erkannte offene Ports & Dienste
+    ports_cur = conn.execute(
+        "SELECT port, proto, service, last_seen FROM host_ports WHERE mac = ? ORDER BY port ASC",
+        (mac,),
+    ).fetchall()
+    ports = [dict(r) for r in ports_cur]
+
+    # 3. Sicherheits-Events zu diesem Host
+    events_cur = conn.execute(
+        """SELECT e.id, e.ts, e.detector, COALESCE(v.severity, e.severity_hint) as sev, e.title
+           FROM events e
+           LEFT JOIN event_evaluations v ON v.event_id = e.id
+           WHERE e.src = ? OR e.dst = ? OR e.title LIKE '%' || ? || '%'
+           ORDER BY e.id DESC LIMIT 10""",
+        (row["ips"] or "", row["ips"] or "", mac),
+    ).fetchall()
+    events = [dict(r) for r in events_cur]
+
+    return {
+        "mac": row["mac"],
+        "vendor": row["vendor"] or "Unbekannt",
+        "first_seen": row["first_seen"],
+        "last_seen": row["last_seen"],
+        "status": status,
+        "status_color": color,
+        "ips": (row["ips"] or "—").split(", "),
+        "ports": ports,
+        "events": events,
+    }

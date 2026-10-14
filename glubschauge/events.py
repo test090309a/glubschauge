@@ -35,6 +35,18 @@ class Event:
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS host_ports (
+    mac         TEXT NOT NULL,
+    ip          TEXT NOT NULL,
+    port        INTEGER NOT NULL,
+    proto       TEXT NOT NULL,
+    service     TEXT NOT NULL DEFAULT '',
+    banner      TEXT NOT NULL DEFAULT '',
+    last_seen   TEXT NOT NULL,
+    PRIMARY KEY (mac, port, proto)
+);
+CREATE INDEX IF NOT EXISTS idx_host_ports_mac ON host_ports(mac);
+
 CREATE TABLE IF NOT EXISTS events (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     ts            TEXT    NOT NULL,
@@ -168,3 +180,26 @@ class EventStore:
 
     def close(self) -> None:
         self._conn.close()
+
+    def upsert_port(self, mac: str, ip: str, port: int, proto: str, service: str, ts: datetime) -> None:
+            iso = ts.isoformat()
+            self._conn.execute(
+                """INSERT INTO host_ports (mac, ip, port, proto, service, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(mac, port, proto) DO UPDATE SET
+                    ip = excluded.ip,
+                    service = CASE WHEN excluded.service != '' THEN excluded.service ELSE host_ports.service END,
+                    last_seen = excluded.last_seen""",
+                (mac, ip, port, proto.lower(), service, iso)
+            )
+            self._conn.commit()
+
+    def get_host_ports(self, mac: str) -> list[dict]:
+        rows = self._conn.execute(
+            """SELECT port, proto, service, last_seen
+            FROM host_ports
+            WHERE mac = ?
+            ORDER BY port ASC""",
+            (mac,)
+        ).fetchall()
+        return [{"port": r[0], "proto": r[1], "service": r[2], "last_seen": r[3]} for r in rows]

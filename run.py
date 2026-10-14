@@ -15,6 +15,7 @@ from glubschauge.detectors   import (
     DnsFailureDetector, NewHostDetector, SynFanOutDetector,
     SynFanOutMultiDetector,
     BeaconingDetector, HighVolumeFlowDetector, ArpSpoofDetector,
+    ServiceDiscoveryDetector
 )
 
 from glubschauge.engine      import RuleEngine
@@ -124,6 +125,10 @@ def main() -> None:
         ArpSpoofDetector(
             target_ip="192.168.0.1", # Deine Router-IP
             target_mac="00:11:22:33:44:55" # Die echte MAC deines Routers
+        ),
+        ServiceDiscoveryDetector(
+            store=store,
+            local_subnets=cfg.network.local_subnets,
         ),
     ]
 
