@@ -1,17 +1,22 @@
 """glubschauge — Einstiegspunkt TUI."""
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+
 import asyncio
 import logging
 import logging.handlers
-import sys
-from pathlib import Path
+
 
 from glubschauge.capture     import TSharkCapture
 from glubschauge.config      import load as load_config
 from glubschauge.detectors   import (
     DnsFailureDetector, NewHostDetector, SynFanOutDetector,
     SynFanOutMultiDetector,
-    BeaconingDetector, HighVolumeFlowDetector,
+    BeaconingDetector, HighVolumeFlowDetector, ArpSpoofDetector,
 )
+
 from glubschauge.engine      import RuleEngine
 from glubschauge.events      import EventStore
 from glubschauge.llm         import OllamaClient
@@ -116,6 +121,10 @@ def main() -> None:
             threshold_mb=cfg.detectors.volume_threshold_mb,
             window_s=cfg.detectors.volume_window_s,
         ),
+        ArpSpoofDetector(
+            target_ip="192.168.0.1", # Deine Router-IP
+            target_mac="00:11:22:33:44:55" # Die echte MAC deines Routers
+        ),
     ]
 
     llm_queue      = asyncio.Queue(maxsize=100)
@@ -148,7 +157,13 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\nBye.")
+    # Wir leiten stderr in eine Datei um, um den "blitzartigen" Fehler zu sehen
+    with open("crash_log.txt", "w") as f:
+        sys.stderr = f
+        try:
+            main()
+        except Exception:
+            # Hier wird der Traceback in die Datei geschrieben
+            import traceback
+            traceback.print_exc()
+            raise

@@ -32,12 +32,16 @@ class RuleEngine:
     async def run(self) -> None:
         try:
             async for pkt in self.capture.stream():
+                if "arp" in pkt.protocols:
+                   log.info("ARP-DEBUG: %s", pkt.raw.get("arp"))
                 self._processed += 1
                 if self.packet_queue is not None:
                     try:
                         self.packet_queue.put_nowait(pkt)
                     except asyncio.QueueFull:
-                        pass    # TUI kann nicht mithalten → Paket verwerfen
+                        # Logging des Queue-Überlaufs zur Performance-Diagnose
+                        if self._processed % 1000 == 0:
+                            log.warning("TUI Packet-Queue voll. Paket #%d verworfen.", self._processed)
 
                 for det in self.detectors:
                     try:
@@ -58,7 +62,7 @@ class RuleEngine:
             try:
                 self.event_queue.put_nowait((event_id, ev))
             except asyncio.QueueFull:
-                log.warning("Event-Queue voll, verwerfe #%d", event_id)
+                log.warning("LLM Event-Queue voll, verwerfe #%d", event_id)
 
         # Queue 2: → TUI EventFeed (erwartet 3-Tupel, severity=None = neue Zeile)
         if self.ui_event_queue is not None:

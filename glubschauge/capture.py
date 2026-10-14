@@ -221,12 +221,23 @@ def _parse_iso_utc(s: str | None) -> datetime:
 
 
 def _extract_endpoints(layers: dict) -> tuple[str, str, int | None, int | None]:
-    """Zieht src/dst/ports aus den verschiedenen Layer-Varianten."""
+    """Zieht src/dst/ports aus IP-, IPv6- oder ARP-Layern."""
     ip = layers.get("ip") or layers.get("ipv6") or {}
+    arp = layers.get("arp") or {}
     eth = layers.get("eth") or {}
 
-    src = ip.get("ip_ip_src") or ip.get("ipv6_ipv6_src") or eth.get("eth_eth_src", "?")
-    dst = ip.get("ip_ip_dst") or ip.get("ipv6_ipv6_dst") or eth.get("eth_eth_dst", "?")
+    src = (
+        ip.get("ip_ip_src")
+        or ip.get("ipv6_ipv6_src")
+        or arp.get("arp_arp_src_proto_ipv4")
+        or eth.get("eth_eth_src", "?")
+    )
+    dst = (
+        ip.get("ip_ip_dst")
+        or ip.get("ipv6_ipv6_dst")
+        or arp.get("arp_arp_dst_proto_ipv4")
+        or eth.get("eth_eth_dst", "?")
+    )
 
     tcp = layers.get("tcp") or {}
     udp = layers.get("udp") or {}

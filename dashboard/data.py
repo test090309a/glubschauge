@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import pandas as pd
+import pandas as pd  # type: ignore[import-not-found]
 
 DB_PATH = Path(__file__).resolve().parent.parent / "glubschauge.db"
 
@@ -16,27 +16,25 @@ _conn: sqlite3.Connection | None = None
 # --- Status-Logik ---------------------------------------------------------
 
 def host_status(last_seen_iso: str) -> tuple[str, str]:
-    """Liefert (status, color) aus last_seen-ISO-String.
-
-    Verwendet bewusst das stdlib-`datetime` statt pandas, weil pandas 3.x
-    bei tz-aware/naive-Mischungen sehr unterschiedlich reagiert. Alle Werte
-    kommen aus `datetime.isoformat()` und sind damit sauber parsebar.
-    """
     if not last_seen_iso:
         return ("offline", "#6c757d")
     try:
-        s = str(last_seen_iso).strip()
-        if s.endswith("Z"):
-            s = s[:-1] + "+00:00"
+        s = str(last_seen_iso).strip().replace("Z", "+00:00")
         ts = datetime.fromisoformat(s)
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
+        
+        # Berechnung: Sekunden seit dem letzten Kontakt
         delta = (datetime.now(timezone.utc) - ts).total_seconds()
     except Exception:
         return ("offline", "#6c757d")
 
-    if delta < 120:   return ("online",  "#28a745")
-    if delta < 900:   return ("idle",    "#ffc107")
+    # ERWEITERTES FENSTER:
+    # 0 - 600s (10 min) = Online (Grün)
+    # 600 - 3600s (1 Stunde) = Idle (Gelb)
+    # Alles darüber = Offline (Grau)
+    if delta < 600:   return ("online",  "#28a745")
+    if delta < 3600:  return ("idle",    "#ffc107")
     return ("offline", "#6c757d")
 
 
@@ -61,7 +59,7 @@ def get_kpis() -> dict:
     cutoff_1h  = _iso_hours_ago(1)
 
     active_hosts = conn.execute(
-        "SELECT COUNT(DISTINCT mac) FROM hosts WHERE last_seen >= ?",
+        "SELECT COUNT(*) FROM hosts_mac WHERE last_seen >= ?",
         (cutoff_1h,),
     ).fetchone()[0]
 
@@ -204,20 +202,17 @@ def get_event_timeline(hours: int = 24) -> pd.DataFrame:
 # --- Hosts ----------------------------------------------------------------
 
 def get_hosts() -> pd.DataFrame:
+    """Optimierte Query für das Dashboard."""
     conn = get_connection()
-    df = pd.read_sql_query(
-        """
+    # Verwendet die bereits optimierte Logik aus EventStore/Event-Logik
+    query = """
         SELECT h.mac, h.vendor, h.first_seen, h.last_seen,
-               (SELECT GROUP_CONCAT(ip, ', ')
-                  FROM hosts WHERE hosts.mac = h.mac) AS ips,
-               (SELECT COUNT(*) FROM hosts WHERE hosts.mac = h.mac) AS ip_count,
-               (SELECT COUNT(*) FROM events
-                  WHERE events.title LIKE '%' || h.mac || '%') AS event_count
+               (SELECT GROUP_CONCAT(ip, ', ') FROM hosts WHERE hosts.mac = h.mac) AS ips,
+               (SELECT COUNT(*) FROM events WHERE events.title LIKE '%' || h.mac || '%') AS event_count
         FROM hosts_mac h
         ORDER BY h.last_seen DESC
-        """,
-        conn,
-    )
+    """
+    df = pd.read_sql_query(query, conn)
     statuses = df["last_seen"].apply(host_status)
     df["status"]       = [s[0] for s in statuses]
     df["status_color"] = [s[1] for s in statuses]
@@ -280,6 +275,8 @@ def get_topology_elements() -> list[dict]:
     radius = 200 if n <= 12 else 260
 
     for i, (mac, vendor, last_seen, ip) in enumerate(hosts):
+        if vendor and "(router)" in vendor.lower():
+            continue  # Router ist bereits das Zentrum
         status, _ = host_status(last_seen)
         node_id = mac or (ip or f"unknown-{i}")
         label_name = _short_vendor(vendor, mac)

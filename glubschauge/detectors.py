@@ -94,6 +94,7 @@ def _tcp_flags(pkt: Packet) -> set[str]:
 
     return set()
 
+
 def _has_tcp(pkt: Packet) -> bool:
     """True, wenn das Paket einen TCP-Layer hat – robust gegen
     tshark-Ketten wie 'eth:ethertype:ip:tcp:tcp.options'."""
@@ -108,6 +109,7 @@ def _has_icmp(pkt: Packet) -> bool:
         return True
     return "icmp" in pkt.raw or "icmpv6" in pkt.raw
 
+
 # ---------------------------------------------------------------------------
 # Detektor 1: neuer Host im LAN
 # ---------------------------------------------------------------------------
@@ -115,14 +117,14 @@ def _has_icmp(pkt: Packet) -> bool:
 class NewHostDetector(Detector):
     """Erkennt neue physische Geräte (per MAC) im LAN.
 
-    Zusätzlich hält dieser Detector die `last_seen`-Spalten in der DB aktuell,
-    damit das Dashboard einen sinnvollen Online-/Idle-/Offline-Status zeigen
-    kann. Die DB-Writes werden auf ein Intervall von TOUCH_INTERVAL_S
-    gedrosselt, damit bei 1000+ pkts/s nicht die DB zum Flaschenhals wird.
+    Hält zusätzlich die `last_seen`-Spalten in der DB aktuell, damit das
+    Dashboard einen sinnvollen Online-/Idle-/Offline-Status zeigen kann.
+    Die DB-Writes werden auf ein Intervall von TOUCH_INTERVAL_S gedrosselt,
+    damit bei 1000+ pkts/s nicht die DB zum Flaschenhals wird.
     """
 
     name = "new_host"
-    TOUCH_INTERVAL_S = 30.0   # pro (mac, ip) bzw. pro mac
+    TOUCH_INTERVAL_S = 30.0   # pro MAC
 
     def __init__(self, store: EventStore, local_subnets: list[str],
                  trusted_macs: list[str] | None = None,
@@ -133,10 +135,9 @@ class NewHostDetector(Detector):
         self.warmup_end = datetime.now(timezone.utc) + timedelta(seconds=warmup_seconds)
 
         # In-Memory-Caches, um DB-Queries pro Paket zu vermeiden
-        self._known_ips:   set[tuple[str, str]] = store.load_hosts()
-        self._known_macs:  set[str]             = store.load_macs()
-        self._last_ip_touch:  dict[tuple[str, str], float] = {}
-        self._last_mac_touch: dict[str, float]             = {}
+        self._known_ips:  set[tuple[str, str]] = store.load_hosts()
+        self._known_macs: set[str]             = store.load_macs()
+        self._last_mac_touch: dict[str, float] = {}
 
     def _is_local(self, ip_str: str) -> bool:
         try:
@@ -147,59 +148,71 @@ class NewHostDetector(Detector):
             return False
         return any(ip in net for net in self.subnets)
 
+    @staticmethod
+    def _is_usable_mac(m: str) -> bool:
+        """Broadcast & Multicast-MACs rausfiltern."""
+        if not m or m == "ff:ff:ff:ff:ff:ff":
+            return False
+        try:
+            if int(m[:2], 16) & 0x01:      # multicast bit
+                return False
+        except (ValueError, IndexError):
+            return False
+        return True
+
     def feed(self, pkt: Packet):
         eth = pkt.raw.get("eth") or {}
-        mac = (eth.get("eth_eth_src") or "").lower()
-        ip  = pkt.src
+        src_mac = (eth.get("eth_eth_src") or "").lower()
+        dst_mac = (eth.get("eth_eth_dst") or "").lower()
 
-        if not mac or not ip or ip == "?":
-            return
-        if mac.startswith(("01:", "33:", "ff:")):
-            return
-        if not self._is_local(ip):
-            return
+        # (MAC, IP)-Paare sammeln, bei denen die IP lokal ist
+        pairs: list[tuple[str, str]] = []
+        if pkt.src and pkt.src != "?" and self._is_local(pkt.src) \
+                and self._is_usable_mac(src_mac):
+            pairs.append((src_mac, pkt.src))
+        if pkt.dst and pkt.dst != "?" and self._is_local(pkt.dst) \
+                and self._is_usable_mac(dst_mac):
+            pairs.append((dst_mac, pkt.dst))
 
-        now_ts = pkt.timestamp.timestamp()
-
-        # --- Erstkontakt dieser MAC? ---
-        is_new_mac = mac not in self._known_macs
-        vendor     = vendor_for(mac)
-        if is_new_mac:
-            self._known_macs.add(mac)
-            self.store.upsert_mac(mac, vendor, pkt.timestamp)
-
-        # --- (MAC, IP)-Paar pflegen (gedrosselt) ---
-        key = (mac, ip)
-        is_new_pair = key not in self._known_ips
-        last_ip = self._last_ip_touch.get(key, 0.0)
-        if is_new_pair or (now_ts - last_ip) > self.TOUCH_INTERVAL_S:
-            self._known_ips.add(key)
-            self.store.remember_host(mac, ip, pkt.timestamp)
-            self._last_ip_touch[key] = now_ts
-
-        # --- hosts_mac.last_seen pflegen (gedrosselt) ---
-        last_mac = self._last_mac_touch.get(mac, 0.0)
-        if is_new_mac or (now_ts - last_mac) > self.TOUCH_INTERVAL_S:
-            self.store.touch_mac(mac, pkt.timestamp)
-            self._last_mac_touch[mac] = now_ts
-
-        # --- Event nur beim allerersten Auftauchen dieser MAC ---
-        if not is_new_mac:
-            return
-        if datetime.now(timezone.utc) < self.warmup_end:
-            return
-        if mac in self.trusted:
+        if not pairs:
             return
 
-        yield Event(
-            detector=self.name,
-            timestamp=pkt.timestamp,
-            severity_hint=3,
-            title=f"Neues Gerät: {vendor} ({mac}) — {ip}",
-            src=ip,
-            details={"mac": mac, "vendor": vendor, "first_ip": ip,
-                     "frame": pkt.frame_number},
-        )
+        now    = pkt.timestamp
+        now_ts = now.timestamp()
+        warmup = now < self.warmup_end
+
+        for mac, ip in pairs:
+                    is_new_mac  = mac not in self._known_macs
+                    is_new_pair = (mac, ip) not in self._known_ips
+
+                    # --- Neue Geräte persistieren + Event erzeugen ---
+                    if is_new_mac or is_new_pair:
+                        vendor = vendor_for(mac)
+
+                        if is_new_mac:
+                            self.store.upsert_mac(mac, vendor, now)
+                            self._known_macs.add(mac)
+                        if is_new_pair:
+                            self.store.remember_host(mac, ip, now)
+                            self._known_ips.add((mac, ip))
+
+                        # Nur alarmieren, wenn NICHT vertrauenswürdig und Warmup vorbei
+                        if not warmup and is_new_mac and (mac not in self.trusted):
+                            yield Event(
+                                detector=self.name,
+                                timestamp=now,
+                                severity_hint=3,
+                                title=f"Neues Gerät: {vendor} ({mac}) — {ip}",
+                                src=ip,
+                                dst="",
+                                details={"mac": mac, "ip": ip, "vendor": vendor},
+                            )
+
+                    # --- last_seen pflegen (gedrosselt, AUCH FÜR TRUSTED HOSTS) ---
+                    last = self._last_mac_touch.get(mac, 0.0)
+                    if (now_ts - last) > self.TOUCH_INTERVAL_S:
+                        self.store.touch_mac(mac, now)
+                        self._last_mac_touch[mac] = now_ts
 
 
 # ---------------------------------------------------------------------------
@@ -474,6 +487,7 @@ class HighVolumeFlowDetector(Detector):
                      "protocol": pkt.protocol},
         )
 
+
 # ---------------------------------------------------------------------------
 # Detektor 6: Multi-Target SYN-Scan (LAN)
 # ---------------------------------------------------------------------------
@@ -589,3 +603,47 @@ class SynFanOutMultiDetector(Detector):
                 "cooldown_s":       int(self.cooldown.total_seconds()),
             },
         )
+
+
+# ---------------------------------------------------------------------------
+# Detektor 7: ARP-Spoofing
+# ---------------------------------------------------------------------------
+
+class ArpSpoofDetector(Detector):
+    name = "arp_spoof"
+
+    def __init__(self, target_ip: str, target_mac: str) -> None:
+        self.target_ip  = target_ip
+        self.target_mac = target_mac.lower()
+        self._cache: dict[str, str] = {target_ip: self.target_mac}
+
+    def feed(self, pkt: Packet):
+        if "arp" not in pkt.protocols:
+            return
+
+        arp = pkt.raw.get("arp", {})
+        # Wir verwenden die exakten Namen aus dem tshark-Trace
+        sender_ip  = arp.get("arp_arp_src_proto_ipv4")
+        sender_mac = (arp.get("arp_arp_src_hw_mac") or "").lower()
+
+        if not sender_ip or not sender_mac:
+            return
+
+        # Check: Ist die IP bekannt und hat sich die MAC geändert?
+        if sender_ip in self._cache and self._cache[sender_ip] != sender_mac:
+            old_mac = self._cache[sender_ip]
+
+            # Alarm schlagen, wenn unser Zielgerät (Router) plötzlich eine andere MAC hat
+            if sender_ip == self.target_ip:
+                yield Event(
+                    detector=self.name,
+                    timestamp=pkt.timestamp,
+                    severity_hint=9,
+                    title=f"ARP-SPOOFING: {sender_ip} ist nun {sender_mac} (war: {old_mac})",
+                    src=sender_mac,
+                    dst=sender_ip,
+                    details={"ip": sender_ip, "new_mac": sender_mac, "old_mac": old_mac},
+                )
+
+        # Cache mit der aktuell gesehenen MAC für diese IP aktualisieren
+        self._cache[sender_ip] = sender_mac
