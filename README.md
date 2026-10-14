@@ -151,15 +151,25 @@ python dashboard/app.py
 Taste	Aktion	Beschreibung
 
 d	Details	Zeigt vollständige Details und LLM-Erklärung zum markierten Event
+
 Esc	Schließen	Schließt das Detail-Panel
+
 w	Wireshark	Öffnet den pcap-Snapshot des Events direkt in Wireshark
+
 h	Hosts / Pakete	Schaltet das linke Panel zwischen Live-Paketen und Host-Inventar um
+
 s	Filter	Schaltet den minimalen Severity-Filter zyklisch durch (0, 2, 3, 5, 7, 8)
+
 r	Re-Analyse	Wiederholt die LLM-Bewertung mit Standardmodell (llama3.1:8b)
+
 R	Tiefenanalyse	Führt forensische Re-Analyse durch (qwen2.5-coder:14b)
+
 e	Export	Schreibt gefilterte Events als Markdown-Report in /reports
+
 c	Leeren	Leert die Tabellenansicht (Datenbank bleibt erhalten)
+
 q	Beenden	Beendet glubschauge und stoppt Hintergrund-Captures
+
 
 ## 📁 Projektstruktur
 
