@@ -1,10 +1,10 @@
-# 👁️ glubschauge
+# 👁️ Glubschauge
 
-> **Heimnetzwerk-Monitor mit lokaler KI, TUI und Web-Dashboard**
+> **Netzwerk-Monitor mit lokaler KI, TUI und Web-Dashboard**
 
-**glubschauge** überwacht passiv den Datenverkehr im lokalen Netzwerk in Echtzeit. Es kombiniert eine leichtgewichtige, regelbasierte Paket- und Anomalie-Erkennung mit **lokalen Sprachmodellen (via Ollama)**, um erkannte Vorfälle ohne Cloud-Abhängigkeit präzise zu bewerten und verständlich zu erklären.
+**Glubschauge** überwacht passiv den Datenverkehr im lokalen Netzwerk in Echtzeit. Es kombiniert eine leichtgewichtige, regelbasierte Paket- und Anomalie-Erkennung mit **lokalen Sprachmodellen (via Ollama)**, um erkannte Vorfälle ohne Cloud-Abhängigkeit präzise zu bewerten und verständlich zu erklären.
 
-Das System bietet sowohl eine blitzschnelle **Terminal-Benutzeroberfläche (TUI)** als auch ein modernes **Web-Dashboard** mit interaktiver Netzwerktopologie und Inventarverwaltung.
+Das System bietet sowohl eine **Terminal-Benutzeroberfläche (TUI)** als auch ein modernes **Web-Dashboard** mit interaktiver Netzwerktopologie und Inventarverwaltung.
 
 ---
 
