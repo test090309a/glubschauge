@@ -7,3 +7,5 @@ M:\projekte_2026\glubschauge> python run.py
 
 2. Das Dashboard:
 M:\projekte_2026\glubschauge\dashboard> python app.py
+
+repo erstellen
