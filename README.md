@@ -147,7 +147,9 @@ python dashboard/app.py
 
 Öffne anschließend http://127.0.0.1:8050 im Browser.
 ⌨️ Tastenbelegung in der TUI
+
 Taste	Aktion	Beschreibung
+
 d	Details	Zeigt vollständige Details und LLM-Erklärung zum markierten Event
 Esc	Schließen	Schließt das Detail-Panel
 w	Wireshark	Öffnet den pcap-Snapshot des Events direkt in Wireshark
