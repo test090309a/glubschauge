@@ -1,28 +1,62 @@
-# Python
+# =====================================================================
+# glubschauge — .gitignore
+# =====================================================================
+
+# --- Python & Bytecode -----------------------------------------------
 __pycache__/
 *.py[cod]
+*$py.class
+*.cpython-*.pyc
+.pytest_cache/
+
+# --- Virtuelle Umgebungen & IDEs -------------------------------------
 .venv/
 venv/
-
-# Datenbank & Logs
-*.db
-*.db-wal
-*.db-shm
-glubschauge.log*
-
-# Ringpuffer
-ring/
-*.pcapng
-
-# Reports & Snapshots
-reports/
-snapshot_*.pcapng
-
-# IDE
-.vscode/
+env/
+ENV/
 .idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
 
-# Test-Skripte (temporär)
-test_*.py
-cleanup.py
+# --- Datenbanken (SQLite + WAL/SHM Lockfiles) ------------------------
+glubschauge.db
+glubschauge.db-shm
+glubschauge.db-wal
+*.db
+*.db-shm
+*.db-wal
 
+# --- Logs & Crash-Dumps ----------------------------------------------
+glubschauge.log*
+crash_log.txt
+*.log
+
+# --- Ringbuffer & Wireshark Captures ---------------------------------
+# Ganzer Ring-Ordner oder alle pcapng-Dateien
+ring/
+*.pcap
+*.pcapng
+snapshot*.pcapng
+
+# --- Reports & Exporte (Ordner behalten, generierte Reports ignorieren)
+reports/*.md
+!reports/.gitkeep
+
+# --- Archive & lokale Backups ----------------------------------------
+*.zip
+*.tar.gz
+*.7z
+glubschauge.zip
+
+# --- Temporäre Notizen & Hilfsdateien --------------------------------
+FOLGEPROMPT.txt
+Paste*
+*.tmp
+
+# --- Betriebssystem-Dateien (Windows / macOS) ------------------------
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
